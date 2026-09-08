@@ -481,7 +481,8 @@ export const useGenerationTaskStore = defineStore('generationTask', () => {
 
     const attachVideo = (vid) => {
       if (!vid?.storyboard_id || !sbIdSet.has(Number(vid.storyboard_id))) return
-      if (!['pending', 'processing'].includes(vid.status)) return
+      // 视频接口的 processing 查询会包含刚完成的记录；恢复时也要触发一次媒体刷新。
+      if (!['pending', 'processing', 'completed'].includes(vid.status)) return
       if (!vid.task_id) return
       const resourceId = Number(vid.storyboard_id)
       const sb = storyboards.find((s) => Number(s.id) === resourceId)

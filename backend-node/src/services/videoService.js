@@ -87,6 +87,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const { randomUUID } = require('crypto');
 const videoClient = require('./videoClient');
+const storyboardService = require('./storyboardService');
 const taskService = require('./taskService');
 const storageLayout = require('./storageLayout');
 const { getFfmpegPath, hasLocalFfmpeg } = require('../utils/ffmpegPath');
@@ -209,6 +210,267 @@ function maybeNormalizeVideoAfterDownload(storagePath, localPath, row, videoGenI
   normalizeVideoFileToTargetPixels(abs, dim.w, dim.h, log, videoGenId);
 }
 
+function hasAssetImageLike(row) {
+  return !!(row && ((row.image_url && String(row.image_url).trim()) || (row.local_path && String(row.local_path).trim())));
+}
+
+function parseAiConfigSettings(config) {
+  const raw = config?.settings;
+  if (!raw) return {};
+  if (typeof raw === 'object' && !Array.isArray(raw)) return raw;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function isTruthyConfigValue(value) {
+  if (value === true || value === 1) return true;
+  const s = String(value || '').trim().toLowerCase();
+  return s === '1' || s === 'true' || s === 'yes' || s === 'on';
+}
+
+function shouldUseRemoteImageRefs(config) {
+  const settings = parseAiConfigSettings(config);
+  return isTruthyConfigValue(settings.use_remote_image_url);
+}
+
+function firstNonEmptyValue(...values) {
+  for (const value of values) {
+    if (value != null && String(value).trim()) return String(value).trim();
+  }
+  return null;
+}
+
+function pickVideoAssetImageRef(row, preferRemote, opts = {}) {
+  const { includeFourView = false } = opts;
+  if (!row) return null;
+  if (preferRemote) {
+    return firstNonEmptyValue(
+      includeFourView ? row.four_view_remote_image_url : null,
+      row.remote_image_url,
+      includeFourView ? row.four_view_image_url : null,
+      row.local_path,
+      row.image_url
+    );
+  }
+  return firstNonEmptyValue(
+    includeFourView ? row.four_view_image_url : null,
+    row.local_path,
+    row.image_url,
+    includeFourView ? row.four_view_remote_image_url : null,
+    row.remote_image_url
+  );
+}
+
+function resolveAssetNameForReference(row, fallback) {
+  const name = row?.name != null ? String(row.name).trim() : '';
+  if (name) return name;
+  const location = row?.location != null ? String(row.location).trim() : '';
+  if (location) return location;
+  const prompt = row?.prompt != null ? String(row.prompt).trim() : '';
+  if (prompt) return prompt;
+  return fallback || '';
+}
+
+function buildVideoReferenceContextNote(db, storyboardId, refCount) {
+  return buildStoryboardReferenceBundle(db, storyboardId, refCount, false).labels
+    .map((label, idx) => `@image${idx + 1} = ${label}`).join('\n');
+}
+
+function formatReferenceContextLabels(labels) {
+  return (Array.isArray(labels) ? labels : [])
+    .map((label, idx) => `@image${idx + 1} = ${label}`)
+    .join('\n');
+}
+
+function buildStoryboardReferenceBundle(db, storyboardId, refCount, preferRemote) {
+  const limit = Math.min(9, Math.max(0, Number(refCount) || 0));
+  if (!limit) return { urls: [], labels: [] };
+  const sb = storyboardService.getStoryboardById(db, storyboardId);
+  if (!sb) return { urls: [], labels: [] };
+
+  const urls = [];
+  const labels = [];
+  const seen = new Set();
+  const pushRef = (url, label) => {
+    const ref = String(url || '').trim();
+    if (!ref || labels.length >= limit) return;
+    if (seen.has(ref)) return;
+    seen.add(ref);
+    urls.push(ref);
+    labels.push(label);
+  };
+
+  if (sb.scene_id) {
+    try {
+      const sceneRow = db.prepare(
+        'SELECT location, time, prompt, image_url, remote_image_url, local_path FROM scenes WHERE id = ? AND deleted_at IS NULL'
+      ).get(Number(sb.scene_id));
+      const sceneRef = pickVideoAssetImageRef(sceneRow, preferRemote);
+      if (sceneRef) {
+        const sceneName = resolveAssetNameForReference(sceneRow, '场景');
+        pushRef(sceneRef, `场景参考图：${sceneName}`);
+      }
+    } catch (_) {}
+  }
+
+  const charItems = Array.isArray(sb.characters) ? sb.characters : [];
+  for (const item of charItems) {
+    if (labels.length >= limit) break;
+    let charRow = null;
+    const idNum = Number(typeof item === 'object' && item != null ? item.id : item);
+    if (Number.isFinite(idNum)) {
+      try {
+        charRow = db.prepare(
+          'SELECT id, name, image_url, remote_image_url, local_path FROM characters WHERE id = ? AND deleted_at IS NULL'
+        ).get(idNum);
+        if (!charRow) {
+          charRow = db.prepare(
+            'SELECT id, name, image_url, remote_image_url, local_path, four_view_image_url, four_view_remote_image_url FROM character_libraries WHERE id = ? AND deleted_at IS NULL'
+          ).get(idNum);
+        }
+      } catch (_) {}
+    }
+    const inlineName = typeof item === 'object' && item != null && item.name != null ? String(item.name).trim() : '';
+    const charName = resolveAssetNameForReference(charRow || { name: inlineName }, '角色');
+    const charRef = pickVideoAssetImageRef(charRow, preferRemote, { includeFourView: true });
+    if (charName && charRef) {
+      pushRef(charRef, `人物参考图：${charName}`);
+    }
+  }
+
+  if (Array.isArray(sb.prop_ids)) {
+    for (const propIdRaw of sb.prop_ids) {
+      if (labels.length >= limit) break;
+      const propId = Number(propIdRaw);
+      if (!Number.isFinite(propId)) continue;
+      try {
+        const propRow = db.prepare(
+          'SELECT id, name, image_url, remote_image_url, local_path FROM props WHERE id = ? AND deleted_at IS NULL'
+        ).get(propId);
+        const propRef = pickVideoAssetImageRef(propRow, preferRemote);
+        if (propRef) {
+          const propName = resolveAssetNameForReference(propRow, '道具');
+          pushRef(propRef, `道具参考图：${propName}`);
+        }
+      } catch (_) {}
+    }
+  }
+
+  return { urls, labels };
+}
+
+function pickStoryboardFrameRef(db, storyboardRow, frame, preferRemote) {
+  if (!storyboardRow) return null;
+  const idKey = frame === 'last' ? 'last_frame_image_id' : 'first_frame_image_id';
+  if (storyboardRow[idKey]) {
+    try {
+      const ig = db.prepare('SELECT image_url, remote_image_url, local_path FROM image_generations WHERE id = ? AND deleted_at IS NULL')
+        .get(Number(storyboardRow[idKey]));
+      const ref = pickVideoAssetImageRef(ig, preferRemote);
+      if (ref) return ref;
+    } catch (_) {}
+  }
+  if (frame === 'last') {
+    return pickVideoAssetImageRef({
+      image_url: storyboardRow.last_frame_image_url,
+      remote_image_url: storyboardRow.last_frame_remote_image_url,
+      local_path: storyboardRow.last_frame_local_path,
+    }, preferRemote);
+  }
+  return pickVideoAssetImageRef(storyboardRow, preferRemote);
+}
+
+function pickClassicMainRef(db, storyboardId, storyboardRow, preferRemote) {
+  try {
+    const row = db.prepare(`
+      SELECT image_url, remote_image_url, local_path
+      FROM image_generations
+      WHERE storyboard_id = ?
+        AND deleted_at IS NULL
+        AND status = 'completed'
+        AND NOT (
+          LOWER(COALESCE(provider, '')) = 'tail-frame'
+          OR LOWER(COALESCE(model, '')) = 'tail-frame-extract'
+          OR prompt LIKE '尾帧衔接：%'
+        )
+      ORDER BY datetime(created_at) DESC, id DESC
+      LIMIT 1
+    `).get(Number(storyboardId));
+    const ref = pickVideoAssetImageRef(row, preferRemote);
+    if (ref) return ref;
+  } catch (_) {}
+  return pickStoryboardFrameRef(db, storyboardRow, 'first', preferRemote);
+}
+
+function listClassicTailLinkRefs(db, storyboardId, preferRemote, storyboardRow) {
+  if (!storyboardId) return [];
+  try {
+    const rows = db.prepare(`
+      SELECT id, image_url, remote_image_url, local_path, prompt
+      FROM image_generations
+      WHERE storyboard_id = ?
+        AND deleted_at IS NULL
+        AND status = 'completed'
+        AND (
+          LOWER(COALESCE(provider, '')) = 'tail-frame'
+          OR LOWER(COALESCE(model, '')) = 'tail-frame-extract'
+          OR prompt LIKE '尾帧衔接：%'
+        )
+      ORDER BY datetime(created_at) DESC, id DESC
+    `).all(Number(storyboardId));
+    return rows
+      .map((row, idx) => ({
+        url: pickVideoAssetImageRef(row, preferRemote),
+        label: idx === 0 ? '尾帧衔接图' : `尾帧衔接图${idx + 1}`,
+      }))
+      .filter((item) => !!item.url);
+  } catch (_) {
+    return [];
+  }
+}
+
+function buildClassicFrameReferenceBundle(db, storyboardId, refCount, preferRemote, fallbackUrls = []) {
+  const limit = Math.min(9, Math.max(0, Number(refCount) || 0));
+  if (!limit) return { urls: [], labels: [] };
+  let sb = null;
+  try {
+    sb = db.prepare(`
+      SELECT first_frame_image_id, last_frame_image_id,
+             image_url, remote_image_url, local_path,
+             last_frame_image_url, last_frame_remote_image_url, last_frame_local_path
+      FROM storyboards WHERE id = ? AND deleted_at IS NULL
+    `).get(Number(storyboardId));
+  } catch (_) {}
+
+  const urls = [];
+  const labels = [];
+  const seen = new Set();
+  const pushRef = (url, label) => {
+    const ref = String(url || '').trim();
+    if (!ref || urls.length >= limit || seen.has(ref)) return;
+    seen.add(ref);
+    urls.push(ref);
+    labels.push(label);
+  };
+
+  pushRef(pickClassicMainRef(db, storyboardId, sb, preferRemote), '当前分镜主图');
+  if (limit > 1) {
+    for (const item of listClassicTailLinkRefs(db, storyboardId, preferRemote, sb)) {
+      pushRef(item.url, item.label);
+      if (urls.length >= limit) break;
+    }
+  }
+  if (urls.length < limit) pushRef(pickStoryboardFrameRef(db, sb, 'last', preferRemote), '分镜尾帧参考图');
+  for (const fallback of Array.isArray(fallbackUrls) ? fallbackUrls : []) {
+    pushRef(fallback, `第${urls.length + 1}张参考图`);
+  }
+  return { urls, labels };
+}
+
 /** 防止同一 videoGenId 重复发起 poll（含重启恢复） */
 const activeVideoPolls = new Set();
 
@@ -241,7 +503,7 @@ async function finalizeSuccessfulVideo(db, log, videoGenId, row, rowForAspect, v
   }
   if (row.storyboard_id) {
     try {
-      db.prepare('UPDATE storyboards SET video_url = ?, local_path = ?, updated_at = ? WHERE id = ?').run(
+      db.prepare('UPDATE storyboards SET video_url = ?, video_local_path = ?, updated_at = ? WHERE id = ?').run(
         videoUrl, localPath, now, row.storyboard_id
       );
       log.info('Updated storyboard video' + (logLabel ? ` (${logLabel})` : ''), {
@@ -465,12 +727,32 @@ async function processVideoGeneration(db, log, videoGenId) {
       if (row.task_id) taskService.updateTaskError(db, row.task_id, '未配置视频模型');
       return;
     }
+    const useRemoteImageRefs = shouldUseRemoteImageRefs(config);
+    const storyboardRow = row.storyboard_id ? storyboardService.getStoryboardById(db, row.storyboard_id) : null;
+    const isUniversalStoryboard = storyboardRow?.creation_mode === 'universal';
     let reference_urls = null;
     if (row.reference_image_urls) {
       try {
         reference_urls = JSON.parse(row.reference_image_urls);
         if (!Array.isArray(reference_urls)) reference_urls = null;
       } catch (_) {}
+    }
+    let referenceBundle = { urls: reference_urls || [], labels: [] };
+    if (row.storyboard_id && reference_urls && reference_urls.length > 0) {
+      if (isUniversalStoryboard) {
+        referenceBundle = buildStoryboardReferenceBundle(db, row.storyboard_id, reference_urls.length, useRemoteImageRefs);
+      } else {
+        referenceBundle = buildClassicFrameReferenceBundle(
+          db,
+          row.storyboard_id,
+          reference_urls.length,
+          useRemoteImageRefs,
+          reference_urls
+        );
+      }
+      if (useRemoteImageRefs && referenceBundle.urls.length > 0) {
+        reference_urls = referenceBundle.urls;
+      }
     }
     // 优先使用分镜自身的镜头时长（storyboard.duration），其次用 video_generations.duration
     let effectiveDuration = row.duration || null;
@@ -500,13 +782,16 @@ async function processVideoGeneration(db, log, videoGenId) {
     }
     const rowForAspect = { ...row, aspect_ratio: aspectForVideo || row.aspect_ratio };
     const hasOmniRefs = !!(reference_urls && reference_urls.length > 0);
+    const reference_context_note = row.storyboard_id
+      ? formatReferenceContextLabels(referenceBundle.labels)
+      : buildVideoReferenceContextNote(db, row.storyboard_id, reference_urls ? reference_urls.length : 0);
     if (row.task_id && hasOmniRefs) {
       taskService.updateTaskStatus(
         db,
         row.task_id,
         'processing',
         5,
-        `正在上传 ${reference_urls.length} 张参考图到图床…`
+        `正在准备 ${reference_urls.length} 张参考图 URL…`
       );
     }
     const result = await videoClient.callVideoApi(db, log, {
@@ -525,6 +810,7 @@ async function processVideoGeneration(db, log, videoGenId) {
       first_frame_url: hasOmniRefs ? undefined : row.first_frame_url,
       last_frame_url: hasOmniRefs ? undefined : row.last_frame_url,
       reference_urls,
+      reference_context_note,
       files_base_url: filesBaseUrl,
       storage_local_path: storageLocalPath,
       video_gen_id: videoGenId,

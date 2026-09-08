@@ -281,7 +281,7 @@ function _doImport(db, storagePath, files, data, d, title, metaStr, now, log) {
         .map(idx => propNewIds[idx])
         .filter(id => id != null);
 
-      // 先插入分镜（首尾帧绑定ID、layout 稍后更新；image_url/local_path 由绑定逻辑设置）
+      // 先插入分镜（首尾帧绑定 ID、layout 稍后更新；image_url/local_path 由绑定逻辑设置）
       // 使用并行数组维护列名与值，确保列数与传参数量永远一致，避免“44 values for 43 columns”类错误
       const sbCols = [
         'episode_id', 'scene_id', 'storyboard_number', 'title', 'description', 'location', 'time',
@@ -289,7 +289,7 @@ function _doImport(db, storagePath, files, data, d, title, metaStr, now, log) {
         'movement', 'lighting_style', 'depth_of_field', 'image_prompt', 'polished_prompt', 'video_prompt', 'duration',
         'emotion', 'emotion_intensity', 'segment_index', 'segment_title', 'continuity_snapshot', 'creation_mode',
         'universal_segment_text', 'layout_description', 'first_frame_image_id', 'last_frame_image_id',
-        'last_frame_image_url', 'last_frame_local_path', 'image_url', 'local_path', 'characters',
+        'last_frame_image_url', 'last_frame_local_path', 'image_url', 'local_path', 'video_local_path', 'characters',
         'audio_local_path', 'narration_audio_local_path', 'created_at', 'updated_at'
       ];
       const sbVals = [
@@ -331,6 +331,7 @@ function _doImport(db, storagePath, files, data, d, title, metaStr, now, log) {
         sb.last_frame_local_path || null,
         null, // image_url 由首帧绑定设置
         null, // local_path 由首帧绑定设置
+        null, // video_local_path 在导入视频后设置
         charactersJson,
         sbAudioPath || null,
         sbNarrationAudioPath || null,
@@ -412,6 +413,9 @@ function _doImport(db, storagePath, files, data, d, title, metaStr, now, log) {
             `INSERT INTO video_generations (drama_id, storyboard_id, provider, prompt, status, local_path, created_at, updated_at)
              VALUES (?, ?, 'imported', ?, 'completed', ?, ?, ?)`
           ).run(dramaId, sbId, sb.video_prompt || '', videoLocalPath, now, now);
+          db.prepare('UPDATE storyboards SET video_local_path = ?, updated_at = ? WHERE id = ?').run(
+            videoLocalPath, now, sbId
+          );
         }
       }
 

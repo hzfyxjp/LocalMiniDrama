@@ -80,31 +80,41 @@ function getStorageRoot() {
   return path.isAbsolute(p) ? p : path.join(process.cwd(), p);
 }
 
+function isLikelyVideoRef(value) {
+  const s = String(value || '').trim().toLowerCase();
+  if (!s) return false;
+  return /\.(mp4|mov|m4v|webm|mkv|avi|mpeg|mpg)(?:[?#].*)?$/.test(s);
+}
+
 /** 将 video_url 解析为本地文件路径，或下载到 temp 返回路径 */
 async function resolveVideoToLocalPath(videoUrl, baseUrl, storageRoot, tempDir, index, log) {
   if (!videoUrl || typeof videoUrl !== 'string') return null;
   const u = videoUrl.trim();
+  if (!isLikelyVideoRef(u)) {
+    log.warn('Video merge: skip non-video source', { index, source: u.slice(0, 200) });
+    return null;
+  }
   // 1) URL 以 baseUrl 开头（如 http://localhost:5679/static）-> 对应 storageRoot 下相对路径
   if (baseUrl && (u.startsWith(baseUrl) || u.startsWith(baseUrl.replace(/\/$/, '')))) {
     const base = baseUrl.replace(/\/$/, '');
     const rel = u.startsWith(base + '/') ? u.slice(base.length + 1) : u.slice(base.length).replace(/^\//, '');
     if (rel && !rel.startsWith('http')) {
       const localPath = path.join(storageRoot, rel.replace(/\//g, path.sep));
-      if (fs.existsSync(localPath)) {
+      if (fs.existsSync(localPath) && isLikelyVideoRef(localPath)) {
         log.info('Video merge: using local static file', { index, path: localPath });
         return localPath;
       }
     }
   }
   // 2) 已是本地绝对路径且存在
-  if (path.isAbsolute(u) && fs.existsSync(u)) {
+  if (path.isAbsolute(u) && fs.existsSync(u) && isLikelyVideoRef(u)) {
     log.info('Video merge: using absolute path', { index, path: u });
     return u;
   }
   // 3) 相对路径（相对 storageRoot）
   if (!u.startsWith('http://') && !u.startsWith('https://')) {
     const localPath = path.join(storageRoot, u.replace(/^\//, '').replace(/\//g, path.sep));
-    if (fs.existsSync(localPath)) {
+    if (fs.existsSync(localPath) && isLikelyVideoRef(localPath)) {
       log.info('Video merge: using relative path', { index, path: localPath });
       return localPath;
     }

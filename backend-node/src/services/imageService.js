@@ -37,9 +37,11 @@ function rowToItem(r) {
     prompt: r.prompt,
     model: r.model,
     image_url: r.image_url,
+    remote_image_url: r.remote_image_url ?? null,
     local_path: r.local_path,
     status: r.status,
     task_id: r.task_id,
+    provider_task_id: r.provider_task_id,
     error_msg: r.error_msg,
     frame_type: r.frame_type ?? undefined,
     created_at: r.created_at,
@@ -84,6 +86,43 @@ function rowUseFirstFrameLayoutLock(row) {
   const v = row.use_first_frame_layout_lock;
   if (v === 0 || v === false) return false;
   return true;
+}
+
+function parseAiConfigSettings(config) {
+  const raw = config?.settings;
+  if (!raw) return {};
+  if (typeof raw === 'object' && !Array.isArray(raw)) return raw;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function isTruthyConfigValue(value) {
+  if (value === true || value === 1) return true;
+  const s = String(value || '').trim().toLowerCase();
+  return s === '1' || s === 'true' || s === 'yes' || s === 'on';
+}
+
+function shouldUseRemoteImageRefs(config) {
+  const settings = parseAiConfigSettings(config);
+  return isTruthyConfigValue(settings.use_remote_image_url);
+}
+
+function firstNonEmptyValue(...values) {
+  for (const value of values) {
+    if (value != null && String(value).trim()) return String(value).trim();
+  }
+  return null;
+}
+
+function publicRemoteImageUrl(url) {
+  const s = String(url || '').trim();
+  if (!/^https?:\/\//i.test(s)) return null;
+  if (/localhost|127\.0\.0\.1|0\.0\.0\.0/i.test(s)) return null;
+  return s;
 }
 
 /**
@@ -583,16 +622,22 @@ function create(db, log, req) {
 /**
  * 异步处理图片生成：与 Go ProcessImageGeneration 对齐，调用图生 API 并更新记录与任务
  */
-async function processImageGeneration(db, log, imageGenId) {
+async function processImageGeneration(db, log, imageGenId, options = {}) {
   const t0 = Date.now();
   const elapsed = () => `${Date.now() - t0}ms`;
+  const resumeProviderTaskId = options.resume_provider_task_id
+    ? String(options.resume_provider_task_id).trim()
+    : '';
 
   const row = db.prepare('SELECT * FROM image_generations WHERE id = ? AND deleted_at IS NULL').get(Number(imageGenId));
   if (!row) {
     log.error('[图生] 记录不存在', { id: imageGenId });
     return;
   }
-  if (row.status !== 'pending') {
+  const isResuming = row.status === 'processing'
+    && resumeProviderTaskId
+    && String(row.provider_task_id || '').trim() === resumeProviderTaskId;
+  if (row.status !== 'pending' && !isResuming) {
     log.info('[图生] 已被处理，跳过', { id: imageGenId, status: row.status });
     return;
   }
@@ -703,6 +748,7 @@ async function processImageGeneration(db, log, imageGenId) {
       if (row.task_id) taskService.updateTaskError(db, row.task_id, '未配置图片模型');
       return;
     }
+    const useRemoteImageRefs = shouldUseRemoteImageRefs(config);
     log.info('[图生] Step1 AI配置', {
       id: imageGenId,
       provider: config.provider,
@@ -744,8 +790,8 @@ async function processImageGeneration(db, log, imageGenId) {
       if (isLastFrame && useFirstLayoutLock) {
         try {
           const sbFirst = db.prepare(`
-            SELECT first_frame_image_id, image_url, local_path,
-                   last_frame_image_url, last_frame_local_path
+            SELECT first_frame_image_id, image_url, remote_image_url, local_path,
+                   last_frame_image_url, last_frame_remote_image_url, last_frame_local_path
             FROM storyboards WHERE id = ? AND deleted_at IS NULL
           `).get(Number(row.storyboard_id));
 
@@ -753,10 +799,16 @@ async function processImageGeneration(db, log, imageGenId) {
           if (sbFirst) {
             // 优先用显式绑定的 first_frame 图片
             if (sbFirst.first_frame_image_id) {
-              const ig = db.prepare('SELECT local_path, image_url FROM image_generations WHERE id = ?').get(Number(sbFirst.first_frame_image_id));
-              if (ig) firstRef = ig.local_path || ig.image_url;
+              const ig = db.prepare('SELECT local_path, image_url, remote_image_url FROM image_generations WHERE id = ?').get(Number(sbFirst.first_frame_image_id));
+              if (ig) firstRef = useRemoteImageRefs
+                ? firstNonEmptyValue(ig.remote_image_url, ig.local_path, ig.image_url)
+                : firstNonEmptyValue(ig.local_path, ig.image_url);
             }
-            if (!firstRef) firstRef = sbFirst.local_path || sbFirst.image_url; // 兼容旧主图即首帧
+            if (!firstRef) {
+              firstRef = useRemoteImageRefs
+                ? firstNonEmptyValue(sbFirst.remote_image_url, sbFirst.local_path, sbFirst.image_url)
+                : firstNonEmptyValue(sbFirst.local_path, sbFirst.image_url);
+            }
           }
 
           if (firstRef) {
@@ -792,21 +844,26 @@ async function processImageGeneration(db, log, imageGenId) {
         const refs = [];
         const refLabels = [];
         if (sb.scene_id) {
-          const scene = db.prepare('SELECT image_url, local_path, location FROM scenes WHERE id = ? AND deleted_at IS NULL').get(sb.scene_id);
+          const scene = db.prepare('SELECT image_url, remote_image_url, local_path, location FROM scenes WHERE id = ? AND deleted_at IS NULL').get(sb.scene_id);
           if (scene) {
             const locationName = scene.location || 'scene';
             // 优先使用 scenes 表当前主图（image_url / local_path），只有当前字段为空才降级使用历史 quad_panel_0 面板
             // 这样“重新生成场景图”后，分镜图生成能立即取到最新图片
-            let sceneRef = scene.local_path || scene.image_url;
+            let sceneRef = useRemoteImageRefs
+              ? firstNonEmptyValue(scene.remote_image_url, scene.local_path, scene.image_url)
+              : firstNonEmptyValue(scene.local_path, scene.image_url);
             let isPanel = false;
             if (!sceneRef) {
               const scenePanel = db.prepare(
-                `SELECT local_path, image_url FROM image_generations
+                `SELECT local_path, image_url, remote_image_url FROM image_generations
                  WHERE scene_id = ? AND frame_type = 'quad_panel_0' AND status = 'completed'
                  ORDER BY id DESC LIMIT 1`
               ).get(sb.scene_id);
-              if (scenePanel && (scenePanel.local_path || scenePanel.image_url)) {
-                sceneRef = scenePanel.local_path || scenePanel.image_url;
+              const panelRef = scenePanel ? (useRemoteImageRefs
+                ? firstNonEmptyValue(scenePanel.remote_image_url, scenePanel.local_path, scenePanel.image_url)
+                : firstNonEmptyValue(scenePanel.local_path, scenePanel.image_url)) : null;
+              if (panelRef) {
+                sceneRef = panelRef;
                 isPanel = true;
               }
             }
@@ -837,19 +894,24 @@ async function processImageGeneration(db, log, imageGenId) {
           for (const item of charListParsed) {
             if (!imageClient.canAddStoryboardCharacterRef(refLabels, refLimits)) break;
             const cid = typeof item === 'object' && item != null ? item.id : item;
-            const c = db.prepare('SELECT image_url, local_path, name FROM characters WHERE id = ? AND deleted_at IS NULL').get(Number(cid));
+            const c = db.prepare('SELECT image_url, remote_image_url, local_path, name FROM characters WHERE id = ? AND deleted_at IS NULL').get(Number(cid));
             if (!c) continue;
             // 优先使用 characters 表当前主图（image_url / local_path），只有当前字段为空才降级使用历史 quad_panel_1 面板
-            let charRef = c.local_path || c.image_url;
+            let charRef = useRemoteImageRefs
+              ? firstNonEmptyValue(c.remote_image_url, c.local_path, c.image_url)
+              : firstNonEmptyValue(c.local_path, c.image_url);
             let isPanel = false;
             if (!charRef) {
               const charPanel = db.prepare(
-                `SELECT local_path, image_url FROM image_generations
+                `SELECT local_path, image_url, remote_image_url FROM image_generations
                  WHERE character_id = ? AND frame_type = 'quad_panel_1' AND status = 'completed'
                  ORDER BY id DESC LIMIT 1`
               ).get(Number(cid));
-              if (charPanel && (charPanel.local_path || charPanel.image_url)) {
-                charRef = charPanel.local_path || charPanel.image_url;
+              const panelRef = charPanel ? (useRemoteImageRefs
+                ? firstNonEmptyValue(charPanel.remote_image_url, charPanel.local_path, charPanel.image_url)
+                : firstNonEmptyValue(charPanel.local_path, charPanel.image_url)) : null;
+              if (panelRef) {
+                charRef = panelRef;
                 isPanel = true;
               }
             }
@@ -865,10 +927,12 @@ async function processImageGeneration(db, log, imageGenId) {
           for (const link of propLinks) {
             if (!imageClient.canAddStoryboardObjectRef(refLabels, refLimits)) break;
             const prop = db.prepare(
-              'SELECT name, image_url, local_path, ref_image, extra_images FROM props WHERE id = ? AND deleted_at IS NULL'
+              'SELECT name, image_url, remote_image_url, local_path, ref_image, extra_images FROM props WHERE id = ? AND deleted_at IS NULL'
             ).get(Number(link.prop_id));
             if (!prop) continue;
-            let propRef = prop.ref_image || prop.local_path || prop.image_url;
+            let propRef = useRemoteImageRefs
+              ? firstNonEmptyValue(prop.remote_image_url, prop.ref_image, prop.local_path, prop.image_url)
+              : firstNonEmptyValue(prop.ref_image, prop.local_path, prop.image_url);
             if (!propRef && prop.extra_images) {
               try {
                 const extras = typeof prop.extra_images === 'string' ? JSON.parse(prop.extra_images) : prop.extra_images;
@@ -897,7 +961,7 @@ async function processImageGeneration(db, log, imageGenId) {
           for (const link of libLinks) {
             if (!imageClient.canAddStoryboardCharacterRef(refLabels, refLimits)) break;
             const lib = db.prepare(
-              'SELECT id, name, four_view_image_url, image_url, local_path FROM character_libraries WHERE id = ? AND deleted_at IS NULL'
+              'SELECT id, name, four_view_image_url, four_view_remote_image_url, image_url, remote_image_url, local_path FROM character_libraries WHERE id = ? AND deleted_at IS NULL'
             ).get(link.character_id);
             if (!lib) continue;
             if (restrictLibToExplicitSelection) {
@@ -907,17 +971,22 @@ async function processImageGeneration(db, log, imageGenId) {
             if (coveredNames.has(lib.name)) continue;
             // 优先使用角色库当前主图（four_view_image_url → image_url → local_path），只有当前字段为空才降级使用历史 quad_panel_1 面板
             // 这样“重新生成角色四视图/主图”后，分镜图生成能立即取到最新图片
-            let libRef = lib.four_view_image_url || lib.local_path || lib.image_url;
+            let libRef = useRemoteImageRefs
+              ? firstNonEmptyValue(lib.four_view_remote_image_url, lib.remote_image_url, lib.four_view_image_url, lib.local_path, lib.image_url)
+              : firstNonEmptyValue(lib.four_view_image_url, lib.local_path, lib.image_url);
             let isPanel = false;
             let isFourView = !!lib.four_view_image_url;
             if (!libRef) {
               const libPanel = db.prepare(
-                `SELECT local_path, image_url FROM image_generations
+                `SELECT local_path, image_url, remote_image_url FROM image_generations
                  WHERE character_id = ? AND frame_type = 'quad_panel_1' AND status = 'completed'
                  ORDER BY id DESC LIMIT 1`
               ).get(lib.id);
-              if (libPanel && (libPanel.local_path || libPanel.image_url)) {
-                libRef = libPanel.local_path || libPanel.image_url;
+              const panelRef = libPanel ? (useRemoteImageRefs
+                ? firstNonEmptyValue(libPanel.remote_image_url, libPanel.local_path, libPanel.image_url)
+                : firstNonEmptyValue(libPanel.local_path, libPanel.image_url)) : null;
+              if (panelRef) {
+                libRef = panelRef;
                 isPanel = true;
                 isFourView = false;
               }
@@ -961,19 +1030,24 @@ async function processImageGeneration(db, log, imageGenId) {
               if (!scanText.includes(dChar.name.toLowerCase())) continue;
               if (!imageClient.canAddStoryboardCharacterRef(refLabels, refLimits)) break;
               const dCharRow = db.prepare(
-                'SELECT image_url, local_path FROM characters WHERE id = ? AND deleted_at IS NULL'
+                'SELECT image_url, remote_image_url, local_path FROM characters WHERE id = ? AND deleted_at IS NULL'
               ).get(Number(dChar.id));
               // 优先使用 characters 表当前主图（image_url / local_path），只有当前字段为空才降级使用历史 quad_panel_1 面板
-              let charRef = dCharRow?.local_path || dCharRow?.image_url;
+              let charRef = useRemoteImageRefs
+                ? firstNonEmptyValue(dCharRow?.remote_image_url, dCharRow?.local_path, dCharRow?.image_url)
+                : firstNonEmptyValue(dCharRow?.local_path, dCharRow?.image_url);
               let isPanel = false;
               if (!charRef) {
                 const charPanel = db.prepare(
-                  `SELECT local_path, image_url FROM image_generations
+                  `SELECT local_path, image_url, remote_image_url FROM image_generations
                    WHERE character_id = ? AND frame_type = 'quad_panel_1' AND status = 'completed'
                    ORDER BY id DESC LIMIT 1`
                 ).get(Number(dChar.id));
-                if (charPanel && (charPanel.local_path || charPanel.image_url)) {
-                  charRef = charPanel.local_path || charPanel.image_url;
+                const panelRef = charPanel ? (useRemoteImageRefs
+                  ? firstNonEmptyValue(charPanel.remote_image_url, charPanel.local_path, charPanel.image_url)
+                  : firstNonEmptyValue(charPanel.local_path, charPanel.image_url)) : null;
+                if (panelRef) {
+                  charRef = panelRef;
                   isPanel = true;
                 }
               }
@@ -1376,8 +1450,23 @@ async function processImageGeneration(db, log, imageGenId) {
       files_base_url: filesBaseUrl,
       storage_local_path: storageLocalPath,
       system_prompt: apiSystemPrompt,
+      reference_context_note,
       negative_prompt: row.negative_prompt || undefined,
       frame_identity_lock: isFrameIdentityLock,
+      resume_provider_task_id: isResuming ? resumeProviderTaskId : undefined,
+      onTaskSubmitted: async (providerTaskId) => {
+        const submittedAt = new Date().toISOString();
+        db.prepare(
+          'UPDATE image_generations SET provider_task_id = ?, status = ?, updated_at = ? WHERE id = ?'
+        ).run(providerTaskId, 'processing', submittedAt, imageGenId);
+        if (row.task_id) {
+          taskService.updateTaskStatus(db, row.task_id, 'processing', 5, '图片任务已提交，等待上游生成…');
+        }
+        log.info('[图生] 已保存上游 task_id', {
+          id: imageGenId,
+          task_id: providerTaskId,
+        });
+      },
     });
     log.info('[图生] Step4 图生 API 返回', { id: imageGenId, api_ms: Date.now() - tApi, has_error: !!result.error, elapsed: elapsed() });
 
@@ -1436,6 +1525,7 @@ async function processImageGeneration(db, log, imageGenId) {
       log.warn('[图生] Step5 保存失败（不影响结果）', { id: imageGenId, err: saveErr.message, elapsed: elapsed() });
     }
 
+    const remoteImageUrl = publicRemoteImageUrl(result.image_url);
     // 入库的 image_url：优先指向本地静态路径，避免前端仍用 Gemini 返回的 data URL
     let persistedImageUrl = result.image_url;
     if (localPath) {
@@ -1444,12 +1534,13 @@ async function processImageGeneration(db, log, imageGenId) {
 
     // ── Step 6: 写库 & 任务完成 ──────────────────────────────────────
     db.prepare(
-      'UPDATE image_generations SET status = ?, image_url = ?, local_path = ?, completed_at = ?, updated_at = ? WHERE id = ?'
-    ).run('completed', persistedImageUrl, localPath, now2, now2, imageGenId);
+      'UPDATE image_generations SET status = ?, image_url = ?, remote_image_url = ?, local_path = ?, completed_at = ?, updated_at = ? WHERE id = ?'
+    ).run('completed', persistedImageUrl, remoteImageUrl, localPath, now2, now2, imageGenId);
     if (row.task_id) {
       taskService.updateTaskResult(db, row.task_id, {
         image_generation_id: imageGenId,
         image_url: persistedImageUrl,
+        remote_image_url: remoteImageUrl,
         status: 'completed',
       });
     }
@@ -1476,6 +1567,7 @@ async function processImageGeneration(db, log, imageGenId) {
           throw e;
         }
       }
+      db.prepare("UPDATE scenes SET remote_image_url = ? WHERE id = ?").run(remoteImageUrl, row.scene_id);
     }
     log.info('[图生] ✓ 完成', { id: imageGenId, local_path: localPath, total_elapsed: elapsed() });
 
@@ -1509,7 +1601,8 @@ async function processImageGeneration(db, log, imageGenId) {
           effectiveFrameTypeForBind,
           imageGenId,
           persistedImageUrl,
-          localPath
+          localPath,
+          remoteImageUrl
         );
       } catch (bindErr) {
         log.warn('[图生] 分镜首尾帧绑定失败', { id: imageGenId, error: bindErr.message });
@@ -1554,6 +1647,86 @@ async function processImageGeneration(db, log, imageGenId) {
   }
 }
 
+const activeImagePolls = new Set();
+
+function setImageGenerationFailedAfterRestart(db, log, row, message) {
+  const now = new Date().toISOString();
+  db.prepare(
+    'UPDATE image_generations SET status = ?, error_msg = ?, updated_at = ? WHERE id = ?'
+  ).run('failed', message, now, row.id);
+  if (row.task_id) taskService.updateTaskError(db, row.task_id, message);
+  log.warn('[图生] 标记为不可恢复', {
+    image_gen_id: row.id,
+    task_id: row.task_id,
+    status: row.status,
+    error: message,
+  });
+}
+
+/**
+ * 恢复已提交到 OpenAI 兼容异步图片接口的任务。
+ * 只有已持久化 provider_task_id 的 processing 记录才会继续查询，避免重启后重复提交图片任务。
+ */
+async function resumePollForImageGeneration(db, log, imageGenId) {
+  const id = Number(imageGenId);
+  if (activeImagePolls.has(id)) return;
+  const row = db.prepare(
+    'SELECT * FROM image_generations WHERE id = ? AND deleted_at IS NULL'
+  ).get(id);
+  const providerTaskId = String(row?.provider_task_id || '').trim();
+  if (!row || row.status !== 'processing' || !providerTaskId) return;
+
+  activeImagePolls.add(id);
+  try {
+    if (row.task_id) {
+      taskService.updateTaskStatus(db, row.task_id, 'processing', 5, '正在恢复图片任务，继续查询上游结果…');
+    }
+    await processImageGeneration(db, log, id, {
+      resume_provider_task_id: providerTaskId,
+    });
+  } catch (err) {
+    const message = (err.message || '恢复图片任务失败').slice(0, 500);
+    setImageGenerationFailedAfterRestart(db, log, row, message);
+  } finally {
+    activeImagePolls.delete(id);
+  }
+}
+
+/** 启动时恢复可继续查询的异步图片任务；未提交上游任务的记录无法安全重试，明确标记失败。 */
+function resumeProcessingImageGenerations(db, log) {
+  const interrupted = db.prepare(
+    `SELECT * FROM image_generations
+     WHERE status IN ('pending', 'processing')
+       AND (provider_task_id IS NULL OR TRIM(provider_task_id) = '')
+       AND deleted_at IS NULL`
+  ).all();
+  const interruptedMsg = '服务重启后无法恢复图片任务（缺少厂商任务 ID），请重新生成';
+  for (const row of interrupted) {
+    setImageGenerationFailedAfterRestart(db, log, row, interruptedMsg);
+  }
+
+  const resumable = db.prepare(
+    `SELECT id FROM image_generations
+     WHERE status = 'processing'
+       AND provider_task_id IS NOT NULL
+       AND TRIM(provider_task_id) != ''
+       AND deleted_at IS NULL`
+  ).all();
+  if (resumable.length) {
+    log.info('[图生] 恢复异步图片任务轮询', { count: resumable.length });
+  }
+  for (const row of resumable) {
+    setImmediate(() => {
+      resumePollForImageGeneration(db, log, row.id).catch((err) => {
+        log.error('[图生] 恢复异步图片任务异常', {
+          image_gen_id: row.id,
+          error: err.message,
+        });
+      });
+    });
+  }
+}
+
 function deleteById(db, log, id) {
   const numId = Number(id);
   const now = new Date().toISOString();
@@ -1562,8 +1735,8 @@ function deleteById(db, log, id) {
     const row = db.prepare('SELECT storyboard_id FROM image_generations WHERE id = ? AND deleted_at IS NULL').get(numId);
     if (row && row.storyboard_id != null) {
       const sid = Number(row.storyboard_id);
-      db.prepare(`UPDATE storyboards SET first_frame_image_id = NULL, image_url = NULL, local_path = NULL, updated_at = ? WHERE id = ? AND first_frame_image_id = ?`).run(now, sid, numId);
-      db.prepare(`UPDATE storyboards SET last_frame_image_id = NULL, last_frame_image_url = NULL, last_frame_local_path = NULL, updated_at = ? WHERE id = ? AND last_frame_image_id = ?`).run(now, sid, numId);
+      db.prepare(`UPDATE storyboards SET first_frame_image_id = NULL, image_url = NULL, remote_image_url = NULL, local_path = NULL, updated_at = ? WHERE id = ? AND first_frame_image_id = ?`).run(now, sid, numId);
+      db.prepare(`UPDATE storyboards SET last_frame_image_id = NULL, last_frame_image_url = NULL, last_frame_remote_image_url = NULL, last_frame_local_path = NULL, updated_at = ? WHERE id = ? AND last_frame_image_id = ?`).run(now, sid, numId);
     }
   } catch (e) {
     try { log?.warn?.('[image delete] 清除分镜绑定失败', { id: numId, err: e.message }); } catch (_) {}
@@ -1586,15 +1759,17 @@ function getBackgroundsForEpisode(db, episodeId) {
 function upload(db, log, req) {
   const now = new Date().toISOString();
   const frameType = req.frame_type ?? null;
+  const remoteImageUrl = req.remote_image_url || publicRemoteImageUrl(req.image_url);
   const info = db.prepare(
-    `INSERT INTO image_generations (storyboard_id, drama_id, provider, prompt, image_url, local_path, frame_type, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?)`
+    `INSERT INTO image_generations (storyboard_id, drama_id, provider, prompt, image_url, remote_image_url, local_path, frame_type, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?)`
   ).run(
     req.storyboard_id ?? null,
     Number(req.drama_id) || 0,
     'upload',
     req.prompt || '',
     req.image_url || '',
+    remoteImageUrl,
     req.local_path ?? null,
     frameType,
     now,
@@ -1610,7 +1785,8 @@ function upload(db, log, req) {
         row.frame_type,
         row.id,
         row.image_url,
-        row.local_path
+        row.local_path,
+        row.remote_image_url
       );
     } catch (_) {}
   }
@@ -1682,6 +1858,8 @@ module.exports = {
   getBackgroundsForEpisode,
   upload,
   processImageGeneration,
+  resumeProcessingImageGenerations,
+  resumePollForImageGeneration,
   aspectRatioToSize,
   syncStoryboardCharacters,
 };

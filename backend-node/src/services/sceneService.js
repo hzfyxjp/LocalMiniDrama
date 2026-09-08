@@ -28,6 +28,7 @@ function updateScene(db, log, sceneId, req) {
   if (req.polished_prompt != null) { updates.push('polished_prompt = ?'); params.push(req.polished_prompt); }
   if (req.polished_prompt_single != null) { updates.push('polished_prompt_single = ?'); params.push(req.polished_prompt_single); }
   if (req.image_url != null) { updates.push('image_url = ?'); params.push(req.image_url); }
+  if (req.remote_image_url !== undefined) { updates.push('remote_image_url = ?'); params.push(req.remote_image_url ?? null); }
   if (req.local_path !== undefined) { updates.push('local_path = ?'); params.push(req.local_path); }
   if (req.extra_images !== undefined) { updates.push('extra_images = ?'); params.push(req.extra_images ?? null); }
   if (req.ref_image !== undefined) { updates.push('ref_image = ?'); params.push(req.ref_image ?? null); }
@@ -60,8 +61,8 @@ function createScene(db, log, dramaId, req) {
   const episodeId = req.episode_id != null ? Number(req.episode_id) : null;
   try {
     const info = db.prepare(
-      `INSERT INTO scenes (drama_id, episode_id, location, time, prompt, image_url, local_path, storyboard_count, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'pending', ?, ?)`
+      `INSERT INTO scenes (drama_id, episode_id, location, time, prompt, image_url, remote_image_url, local_path, storyboard_count, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'pending', ?, ?)`
     ).run(
       Number(dramaId),
       episodeId,
@@ -69,6 +70,7 @@ function createScene(db, log, dramaId, req) {
       req.time || '',
       req.prompt || '',
       req.image_url ?? null,
+      req.remote_image_url ?? null,
       req.local_path ?? null,
       now,
       now
@@ -79,9 +81,9 @@ function createScene(db, log, dramaId, req) {
     // 老库可能没有 episode_id 列，降级为不含 episode_id 的 INSERT
     if ((e.message || '').includes('episode_id')) {
       const info = db.prepare(
-        `INSERT INTO scenes (drama_id, location, time, prompt, image_url, local_path, storyboard_count, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 1, 'pending', ?, ?)`
-      ).run(Number(dramaId), req.location || '', req.time || '', req.prompt || '', req.image_url ?? null, req.local_path ?? null, now, now);
+        `INSERT INTO scenes (drama_id, location, time, prompt, image_url, remote_image_url, local_path, storyboard_count, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'pending', ?, ?)`
+      ).run(Number(dramaId), req.location || '', req.time || '', req.prompt || '', req.image_url ?? null, req.remote_image_url ?? null, req.local_path ?? null, now, now);
       return getSceneById(db, info.lastInsertRowid);
     }
     throw e;
@@ -119,6 +121,7 @@ function listByDramaId(db, dramaId) {
     polished_prompt_single: row.polished_prompt_single || null,
     description: row.description || null,
     image_url: row.image_url,
+    remote_image_url: row.remote_image_url ?? null,
     local_path: row.local_path,
     extra_images: row.extra_images || null,
     status: row.status,
@@ -138,6 +141,7 @@ function getSceneById(db, id) {
     polished_prompt: row.polished_prompt || null,
     polished_prompt_single: row.polished_prompt_single || null,
     image_url: row.image_url,
+    remote_image_url: row.remote_image_url ?? null,
     local_path: row.local_path,
     extra_images: row.extra_images || null,
     status: row.status,

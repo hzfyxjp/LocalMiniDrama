@@ -54,6 +54,8 @@ export function useScenes(deps) {
   const editSceneForm = ref(null)
   const editSceneSaving = ref(false)
   const editScenePromptGenerating = ref(false)
+  const editSceneSinglePromptGenerating = ref(false)
+  const editSceneFourPromptGenerating = ref(false)
   const extractingSceneDesc = ref(false)
   const addSceneRefImage = ref(null)   // { dataUrl, filename }
   const addSceneRefFileInput = ref(null)
@@ -145,6 +147,7 @@ export function useScenes(deps) {
     showEditScene.value = true
     if (!scene.polished_prompt && scene.id && (scene.location || scene.time)) {
       editScenePromptGenerating.value = true
+      editSceneFourPromptGenerating.value = true
       let elapsed = 0
       editScenePollTimer = setInterval(async () => {
         elapsed += 3
@@ -155,13 +158,16 @@ export function useScenes(deps) {
             if (editSceneForm.value?.id === scene.id) editSceneForm.value.polished_prompt = p
             stopScenePromptPoll()
             editScenePromptGenerating.value = false
+            editSceneFourPromptGenerating.value = false
           } else if (elapsed >= 60) {
             stopScenePromptPoll()
             editScenePromptGenerating.value = false
+            editSceneFourPromptGenerating.value = false
           }
         } catch (_) {
           stopScenePromptPoll()
           editScenePromptGenerating.value = false
+          editSceneFourPromptGenerating.value = false
         }
       }, 3000)
     }
@@ -171,6 +177,7 @@ export function useScenes(deps) {
     const form = editSceneForm.value
     if (!form?.id) return
     editScenePromptGenerating.value = true
+    editSceneFourPromptGenerating.value = true
     try {
       const res = await sceneAPI.generatePrompt(form.id)
       if (res?.polished_prompt) {
@@ -182,6 +189,7 @@ export function useScenes(deps) {
       ElMessage.error(e.message || '生成提示词失败')
     } finally {
       editScenePromptGenerating.value = false
+      editSceneFourPromptGenerating.value = false
     }
   }
 
@@ -189,6 +197,7 @@ export function useScenes(deps) {
     const form = editSceneForm.value
     if (!form?.id) return
     editScenePromptGenerating.value = true
+    editSceneSinglePromptGenerating.value = true
     try {
       const res = await sceneAPI.generatePrompt(form.id, undefined, undefined, 'single')
       if (res?.polished_prompt_single) {
@@ -200,6 +209,7 @@ export function useScenes(deps) {
       ElMessage.error(e.message || '生成提示词失败')
     } finally {
       editScenePromptGenerating.value = false
+      editSceneSinglePromptGenerating.value = false
     }
   }
 
@@ -255,8 +265,8 @@ export function useScenes(deps) {
           location: form.location.trim(),
           time: form.time || undefined,
           prompt: form.prompt || undefined,
-          polished_prompt: form.polished_prompt || undefined,
-          polished_prompt_single: form.polished_prompt_single || undefined
+          polished_prompt: form.polished_prompt ?? '',
+          polished_prompt_single: form.polished_prompt_single ?? ''
         })
         await saveSceneRefImageIfAny(form.id)
         ElMessage.success('场景已保存')
@@ -290,6 +300,8 @@ export function useScenes(deps) {
     showEditScene.value = false
     stopScenePromptPoll()
     editScenePromptGenerating.value = false
+    editSceneSinglePromptGenerating.value = false
+    editSceneFourPromptGenerating.value = false
     addSceneRefImage.value = null
   }
 
@@ -574,6 +586,8 @@ export function useScenes(deps) {
     editSceneForm,
     editSceneSaving,
     editScenePromptGenerating,
+    editSceneSinglePromptGenerating,
+    editSceneFourPromptGenerating,
     extractingSceneDesc,
     addSceneRefImage,
     addSceneRefFileInput,

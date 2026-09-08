@@ -5,6 +5,13 @@ const imageClient = require('./imageClient');
 const propService = require('./propService');
 const uploadService = require('./uploadService');
 const storageLayout = require('./storageLayout');
+
+function normalizeRemoteImageUrl(url) {
+  const s = String(url || '').trim();
+  if (!/^https?:\/\//i.test(s)) return null;
+  if (/localhost|127\.0\.0\.1|0\.0\.0\.0/i.test(s)) return null;
+  return s;
+}
 const { aspectRatioToSize } = require('./imageService');
 
 function appendPrompt(base, extra) {
@@ -120,6 +127,7 @@ async function processPropImageGeneration(db, log, taskId, propId, opts) {
   } catch (_) {}
 
   const now = new Date().toISOString();
+  const remoteImageUrl = normalizeRemoteImageUrl(result.image_url);
   // 旧图追加到 extra_images，与上传逻辑保持一致
   const oldProp = db.prepare('SELECT local_path, image_url, extra_images FROM props WHERE id = ?').get(propId);
   const oldPath = oldProp?.local_path || oldProp?.image_url || '';
@@ -130,11 +138,11 @@ async function processPropImageGeneration(db, log, taskId, propId, opts) {
   const extraJson = extras.length ? JSON.stringify(extras) : null;
   try {
     db.prepare(
-      'UPDATE props SET image_url = ?, local_path = ?, extra_images = ?, updated_at = ? WHERE id = ?'
-    ).run(result.image_url, localPath, extraJson, now, propId);
+      'UPDATE props SET image_url = ?, remote_image_url = ?, local_path = ?, extra_images = ?, updated_at = ? WHERE id = ?'
+    ).run(result.image_url, remoteImageUrl, localPath, extraJson, now, propId);
   } catch (e) {
     if ((e.message || '').includes('extra_images')) {
-      db.prepare('UPDATE props SET image_url = ?, local_path = ?, updated_at = ? WHERE id = ?').run(result.image_url, localPath, now, propId);
+      db.prepare('UPDATE props SET image_url = ?, remote_image_url = ?, local_path = ?, updated_at = ? WHERE id = ?').run(result.image_url, remoteImageUrl, localPath, now, propId);
     } else {
       throw e;
     }
@@ -142,6 +150,7 @@ async function processPropImageGeneration(db, log, taskId, propId, opts) {
 
   taskService.updateTaskResult(db, taskId, {
     image_url: result.image_url,
+    remote_image_url: remoteImageUrl,
     local_path: localPath,
     prop_id: propId,
   });

@@ -27,6 +27,11 @@ function modelFromDb(val) {
   }
 }
 
+function isXx1Sd2VideoModel(modelName) {
+  const m = String(modelName || '').trim().toLowerCase();
+  return /^sd2(?:[-_./]|$)/.test(m) || /(?:^|[-_./])sd2(?:[-_./]|$)/.test(m);
+}
+
 /** 每种服务类型只保留一个默认：若有多个 is_default=1，只保留优先级最高（同优先级取 id 最小）的那条 */
 function ensureSingleDefaultPerType(db) {
   const types = ['text', 'image', 'storyboard_image', 'video', 'tts', 'jimeng2_character_auth', 'model_ark_asset'];
@@ -72,9 +77,16 @@ function createConfig(db, log, req) {
   const model = modelToDb(req.model);
   let endpoint = req.endpoint || '';
   let queryEndpoint = req.query_endpoint || '';
-  if (!endpoint && req.provider) {
+  const st = (req.service_type || 'text').toLowerCase();
+  const proto = (req.api_protocol || '').toLowerCase();
+  if (!endpoint && proto === 'openai_image_tasks' && (st === 'image' || st === 'storyboard_image')) {
+    endpoint = '/v1/images/generations';
+    queryEndpoint = '/v1/images/generations/{taskId}';
+  } else if (!endpoint && proto === 'openai_video_tasks' && st === 'video') {
+    endpoint = '/v1/videos';
+    queryEndpoint = '/v1/videos/{taskId}';
+  } else if (!endpoint && req.provider) {
     const p = req.provider.toLowerCase();
-    const st = (req.service_type || 'text').toLowerCase();
     if (p === 'openai') {
       if (st === 'text') endpoint = '/chat/completions';
       else if (st === 'image') endpoint = '/images/generations';
@@ -256,6 +268,7 @@ async function testConnection(opts) {
   const model = models[0] || '';
   if (!model && (opts.provider === 'gemini' || opts.provider === 'google')) throw new Error('model 必填');
   const provider = (opts.provider || 'openai').toLowerCase();
+  const apiProtocol = (opts.api_protocol || '').toLowerCase();
   const serviceType = (opts.service_type || '').toLowerCase();
   let endpoint = opts.endpoint || '';
 
@@ -366,6 +379,27 @@ async function testConnection(opts) {
   // --- 视频生成服务（非 DashScope）：通过 chat/completions 验证 key 合法性 ---
   // 视频生成 API 调用代价高昂，无法直接测试；但同账号 chat 接口验证 key 有效性即可
   if (isVideoService || looksLikeVideoModel) {
+    if (apiProtocol === 'openai_video_tasks') {
+      endpoint = endpoint || '/v1/videos';
+      const path = endpoint.startsWith('/') ? endpoint : '/' + endpoint;
+      const url = base + path;
+      const body = { model: model || '', prompt: 'test connectivity', aspect_ratio: '1:1', n: 1 };
+      if (isXx1Sd2VideoModel(model)) body.seconds = '1';
+      else body.duration = 1;
+      console.log('[testConnection] xx1 视频服务', { url, serviceType, model, body });
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (opts.api_key || '') },
+        body: JSON.stringify(body),
+      });
+      if (res.status === 401 || res.status === 403) {
+        const text = await res.text();
+        let errMsg = `API Key 无效 (${res.status})`;
+        try { const j = JSON.parse(text); errMsg = j.error?.message || j.message || errMsg; } catch {}
+        throw new Error(errMsg);
+      }
+      return;
+    }
     const chatPath = '/chat/completions';
     const url = base + chatPath;
     const body = { model: model || '', messages: [{ role: 'user', content: 'hi' }], max_tokens: 1 };
@@ -387,10 +421,12 @@ async function testConnection(opts) {
 
   // --- OpenAI 兼容图片生成（volcengine、OpenAI DALL·E、其他）---
   if (treatAsImage) {
-    endpoint = endpoint || '/images/generations';
+    endpoint = endpoint || (apiProtocol === 'openai_image_tasks' ? '/v1/images/generations' : '/images/generations');
     const path = endpoint.startsWith('/') ? endpoint : '/' + endpoint;
     const url = base + path;
-    const body = { model: model || '', prompt: 'test connectivity', n: 1 };
+    const body = apiProtocol === 'openai_image_tasks'
+      ? { model: model || '', prompt: 'test connectivity', n: 1, aspect_ratio: '1:1' }
+      : { model: model || '', prompt: 'test connectivity', n: 1 };
     console.log('[testConnection] 图片服务', { url, serviceType, model, body });
     const res = await fetch(url, {
       method: 'POST',

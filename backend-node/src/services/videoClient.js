@@ -36,6 +36,28 @@ function inferVideoProtocol(provider) {
   return 'openai';
 }
 
+function looksLikeOpenAIVideoTasksConfig(config, modelHint) {
+  const explicit = String(config?.api_protocol || '').trim().toLowerCase();
+  if (explicit === 'openai_video_tasks') return true;
+  const endpoint = String(config?.endpoint || '').trim().toLowerCase();
+  const queryEndpoint = String(config?.query_endpoint || '').trim().toLowerCase();
+  const modelCand = String(
+    modelHint ||
+    config?.default_model ||
+    (Array.isArray(config?.model) ? config.model[0] : config?.model) ||
+    ''
+  ).trim().toLowerCase();
+  const endpointLooksLikeTasks = endpoint === '/v1/videos' || endpoint === 'v1/videos';
+  const queryLooksLikeTasks = queryEndpoint.includes('/v1/videos/{taskid}') || queryEndpoint.includes('/v1/videos/{task_id}');
+  const modelLooksLikeXx1 = /(^|[-_./])xx1($|[-_./])/.test(modelCand);
+  return endpointLooksLikeTasks && (queryLooksLikeTasks || modelLooksLikeXx1);
+}
+
+function isXx1Sd2VideoModel(modelName) {
+  const m = String(modelName || '').trim().toLowerCase();
+  return /^sd2(?:[-_./]|$)/.test(m) || /(?:^|[-_./])sd2(?:[-_./]|$)/.test(m);
+}
+
 /** 官方模型 ID：MiniMax-H3（Video Generation V2） */
 function isMinimaxH3Model(name) {
   const m = String(name || '').trim().toLowerCase();
@@ -65,6 +87,9 @@ function resolveVideoProtocol(config, modelHint) {
   }
   if ((!explicit || protocol === 'openai') && (provider === 'minimax_h3' || isMinimaxH3Model(modelCand))) {
     protocol = 'minimax_h3';
+  }
+  if (looksLikeOpenAIVideoTasksConfig(config, modelCand)) {
+    protocol = 'openai_video_tasks';
   }
   return protocol;
 }
@@ -426,6 +451,49 @@ function publicUrlFromLocalRef(raw, files_base_url) {
   const rel = localRefKeyFromRaw(raw);
   if (!rel || !isPublicFilesBaseUrl(files_base_url)) return null;
   return `${String(files_base_url).replace(/\/$/, '')}/${rel}`;
+}
+
+function buildAtImageReferencePrefix(referenceUrls, contextNote) {
+  const count = Math.min(Array.isArray(referenceUrls) ? referenceUrls.filter(Boolean).length : 0, 9);
+  if (count <= 0) return '';
+  const descByIndex = new Array(count).fill('');
+  const lines = String(contextNote || '')
+    .split('\n')
+    .map((line) => String(line || '').trim())
+    .filter(Boolean);
+  for (const line of lines) {
+    const m = line.match(/^(?:@image|Image)\s*(\d+)\s*[:=]\s*(.+)$/i);
+    if (!m) continue;
+    const idx = Number(m[1]) - 1;
+    if (idx >= 0 && idx < count) descByIndex[idx] = m[2].trim();
+  }
+  const mapped = [];
+  for (let i = 0; i < count; i++) {
+    mapped.push(`@image${i + 1} = ${descByIndex[i] || `第${i + 1}张参考图`}`);
+  }
+  return `参考图对应关系：\n${mapped.join('\n')}`;
+}
+
+function normalizeChineseImageTagsToEnglish(text) {
+  return String(text || '').replace(/@图片\s*(\d+)/g, '@image$1');
+}
+
+async function resolveImageInputForUrlOnlyAsync(rawUrl, files_base_url, storage_local_path, log, video_gen_id, index, roleHint) {
+  const raw = (rawUrl || '').trim();
+  if (!raw) return null;
+  if (isPublicHttpUrl(raw)) return raw;
+
+  const publicFromBase = publicUrlFromLocalRef(raw, files_base_url);
+  if (publicFromBase) {
+    return publicFromBase;
+  }
+
+  if (!storage_local_path) return null;
+  const tag = `xx1_vg${video_gen_id}_${roleHint || index}`;
+  const proxyUrl = await uploadLocalImageToProxy(storage_local_path, raw, log, tag);
+  if (proxyUrl && isPublicHttpUrl(proxyUrl)) return proxyUrl;
+  if (proxyUrl) return proxyUrl;
+  return null;
 }
 
 async function resolveImageInputForAgnesAsync(db, rawUrl, files_base_url, storage_local_path, log, video_gen_id, index) {
@@ -1049,6 +1117,7 @@ function buildQueryUrl(config, taskId) {
   let defaultEp;
   if (isSora) defaultEp = '/v1/videos/{taskId}';
   else if (proto === 'xai') defaultEp = '/v1/videos/{taskId}';
+  else if (proto === 'openai_video_tasks') defaultEp = '/v1/videos/{taskId}';
   else if (proto === 'veo3') defaultEp = '/v1/video/query?id={taskId}';
   else if (isDashScope) defaultEp = '/api/v1/tasks/{taskId}';
   else if (proto === 'volcengine_omni') defaultEp = '/v1/videos/generations/async/{taskId}';
@@ -1080,10 +1149,13 @@ function normalizeVolcModel(name) {
 }
 
 function getModelFromConfig(config, preferredModel) {
+  const preferred = String(preferredModel || '').trim();
+  if (preferred) return preferred;
+  const defaultModel = String(config.default_model || '').trim();
+  if (defaultModel) return defaultModel;
   const models = Array.isArray(config.model) ? config.model : (config.model != null ? [config.model] : []);
-  if (preferredModel && models.includes(preferredModel)) return preferredModel;
-  if (config.default_model && models.includes(config.default_model)) return config.default_model;
-  return models[0] || '';
+  const firstModel = models.map((m) => String(m || '').trim()).find(Boolean);
+  return firstModel || '';
 }
 
 /** 仅把 http(s) 当作可下载直链，避免方舟/中转让 result_url 填入错误文案 */
@@ -1162,6 +1234,8 @@ function videoUrlFromRecord(rec) {
   return (
     coerceHttpVideoUrl(rec.video_url) ||
     coerceHttpVideoUrl(rec.result_url) ||
+    coerceHttpVideoUrl(Array.isArray(rec.result_urls) ? rec.result_urls[0] : null) ||
+    coerceHttpVideoUrl(Array.isArray(rec.video_urls) ? rec.video_urls[0] : null) ||
     coerceHttpVideoUrl(rec.url) ||
     coerceHttpVideoUrl(rec.output_url) ||
     // Agnes Video V2.0 完成态有时将 MP4 直链放在 remixed_from_video_id
@@ -1302,6 +1376,23 @@ function pickProxyVideoUrl(data) {
   }
   if (Array.isArray(d) && d[0]) {
     u = videoUrlFromRecord(d[0]);
+    if (u) return u;
+  }
+  return null;
+}
+
+function pickAsyncVideoUrl(data) {
+  if (!data || typeof data !== 'object') return null;
+  const candidates = [
+    data?.data?.[0]?.url,
+    data?.data?.[0]?.video_url,
+    data?.data?.url,
+    data?.data?.video_url,
+    data?.url,
+    data?.video_url,
+  ];
+  for (const c of candidates) {
+    const u = coerceHttpVideoUrl(c);
     if (u) return u;
   }
   return null;
@@ -3661,6 +3752,154 @@ async function callMinimaxH3VideoApi(config, log, opts) {
   return { error: 'MiniMax H3 未返回 task_id: ' + JSON.stringify(data).slice(0, 300) };
 }
 
+async function callOpenAIVideoTasksApi(config, log, opts) {
+  const {
+    prompt,
+    model,
+    duration,
+    aspect_ratio,
+    image_url,
+    first_frame_url,
+    last_frame_url,
+    reference_urls,
+    reference_image_urls,
+    reference_audio_urls,
+    reference_video_urls,
+    reference_context_note,
+    files_base_url,
+    storage_local_path,
+    video_gen_id,
+  } = opts || {};
+
+  const base = (config.base_url || '').replace(/\/$/, '');
+  let ep = config.endpoint || '/v1/videos';
+  if (!ep.startsWith('/')) ep = '/' + ep;
+  const createUrl = base + ep;
+
+  const refsRaw = Array.isArray(reference_image_urls) && reference_image_urls.length
+    ? reference_image_urls
+    : Array.isArray(reference_urls) ? reference_urls : [];
+  const resolvedRefs = [];
+  for (let i = 0; i < Math.min(refsRaw.length, 9); i++) {
+    const resolved = await resolveImageInputForUrlOnlyAsync(
+      refsRaw[i],
+      files_base_url,
+      storage_local_path,
+      log,
+      video_gen_id,
+      i,
+      'reference'
+    );
+    if (!resolved) {
+      return { error: '该视频模型要求参考图必须是公网 URL。请配置 storage.base_url 为公网地址，或配置 image_proxy.upload_url 让本地图片先上传到图床。' };
+    }
+    resolvedRefs.push(resolved);
+  }
+
+  const audioRefs = Array.isArray(reference_audio_urls)
+    ? reference_audio_urls.filter(Boolean).map((u) => String(u).trim()).filter(Boolean).slice(0, 9)
+    : [];
+  const videoRefs = Array.isArray(reference_video_urls)
+    ? reference_video_urls.filter(Boolean).map((u) => String(u).trim()).filter(Boolean).slice(0, 9)
+    : [];
+  const resolveOptionalImageField = async (rawValue, roleHint) => {
+    const raw = String(rawValue || '').trim();
+    if (!raw) return '';
+    return resolveImageInputForUrlOnlyAsync(
+      raw,
+      files_base_url,
+      storage_local_path,
+      log,
+      video_gen_id,
+      roleHint,
+      roleHint
+    );
+  };
+  const imageUrlForApi = await resolveOptionalImageField(image_url, 'image');
+  if (image_url && !imageUrlForApi) return { error: '该视频模型要求 image_url 必须是公网 URL。请配置 storage.base_url 或 image_proxy.upload_url。' };
+  const firstFrameUrlForApi = await resolveOptionalImageField(first_frame_url, 'first_frame');
+  if (first_frame_url && !firstFrameUrlForApi) return { error: '该视频模型要求 first_frame_url 必须是公网 URL。请配置 storage.base_url 或 image_proxy.upload_url。' };
+  const lastFrameUrlForApi = await resolveOptionalImageField(last_frame_url, 'last_frame');
+  if (last_frame_url && !lastFrameUrlForApi) return { error: '该视频模型要求 last_frame_url 必须是公网 URL。请配置 storage.base_url 或 image_proxy.upload_url。' };
+
+  const normalizedPrompt = normalizeChineseImageTagsToEnglish(prompt || '');
+  const refPrefix = buildAtImageReferencePrefix(resolvedRefs, reference_context_note);
+  const effectivePrompt = refPrefix ? `${refPrefix}\n\n${normalizedPrompt}` : normalizedPrompt;
+  const durationSeconds = Math.max(1, Math.round(Number(duration) || 5));
+  const durationField = isXx1Sd2VideoModel(model) ? 'seconds' : 'duration';
+  const body = {
+    model: model || '',
+    prompt: effectivePrompt,
+    aspect_ratio: aspect_ratio || '16:9',
+    n: 1,
+  };
+  if (durationField === 'seconds') {
+    body.seconds = String(durationSeconds);
+  } else {
+    body.duration = durationSeconds;
+  }
+  if (resolvedRefs.length) body.reference_image_urls = resolvedRefs;
+  if (audioRefs.length) body.reference_audio_urls = audioRefs;
+  if (videoRefs.length) body.reference_video_urls = videoRefs;
+  if (imageUrlForApi) body.image_url = imageUrlForApi;
+  if (firstFrameUrlForApi) body.first_frame_url = firstFrameUrlForApi;
+  if (lastFrameUrlForApi) body.last_frame_url = lastFrameUrlForApi;
+
+  log.info('[xx1 video] 提交请求', {
+    video_gen_id,
+    url: createUrl,
+    model: body.model,
+    aspect_ratio: body.aspect_ratio,
+    duration_field: durationField,
+    duration_value: body[durationField],
+    ref_count: resolvedRefs.length,
+    prompt_len: effectivePrompt.length,
+  });
+  logVideoPostRequest(log, 'xx1Video', createUrl, body, video_gen_id, {
+    model: body.model,
+    aspect_ratio: body.aspect_ratio,
+    duration_field: durationField,
+    duration_value: body[durationField],
+    ref_count: resolvedRefs.length,
+  });
+
+  const res = await fetch(createUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: 'Bearer ' + (config.api_key || ''),
+    },
+    body: JSON.stringify(body),
+  });
+  const raw = await res.text();
+  if (!res.ok) {
+    let errMsg = 'xx1 视频请求失败: ' + res.status;
+    try {
+      const errJson = JSON.parse(raw);
+      const msg = errJson.error?.message || errJson.message || errJson.msg || errJson.error;
+      if (msg) errMsg += ' - ' + String(msg).slice(0, 300);
+    } catch (_) {
+      if (raw) errMsg += ' - ' + raw.slice(0, 200);
+    }
+    return { error: errMsg };
+  }
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch (e) {
+    return { error: 'xx1 视频响应非 JSON: ' + e.message };
+  }
+  const directUrl = pickAsyncVideoUrl(data);
+  if (directUrl) {
+    return { video_url: directUrl };
+  }
+  const taskId = data.id || data.task_id || data.taskId || data.request_id || data.data?.id || data.data?.task_id;
+  if (!taskId) {
+    return { error: 'xx1 视频未返回 task_id: ' + JSON.stringify(data).slice(0, 300) };
+  }
+  return { task_id: String(taskId), status: data.status || data.task_status || 'queued' };
+}
+
 /**
  * ?????? API?ChatFire/?? ? ?????
  * @returns {Promise<{ task_id?: string, video_url?: string, error?: string }>}
@@ -3682,6 +3921,7 @@ async function callVideoApi(db, log, opts) {
     last_frame_local_path,
     files_base_url,
     storage_local_path,
+    reference_context_note,
     video_gen_id
   } = opts;
   const config = getDefaultVideoConfig(db, preferredModel);
@@ -3690,9 +3930,29 @@ async function callVideoApi(db, log, opts) {
   }
   const model = getModelFromConfig(config, preferredModel);
   const provider = (config.provider || '').toLowerCase();
-  const protocol = resolveVideoProtocol(config, preferredModel);
+  const protocol = resolveVideoProtocol(config, model);
   if (db && opts.drama_id && VIDEO_PROTOCOLS_SUPPORT_SD2_ASSET_SCHEME.has(protocol)) {
     opts = applySeedance2CertifiedAssetUrlsToVideoOpts(db, log, opts);
+  }
+
+  if (protocol === 'openai_video_tasks') {
+    return callOpenAIVideoTasksApi(config, log, {
+      prompt,
+      model,
+      duration,
+      aspect_ratio,
+      image_url,
+      first_frame_url,
+      last_frame_url,
+      reference_urls: opts.reference_urls,
+      reference_image_urls: opts.reference_image_urls || opts.reference_urls,
+      reference_audio_urls: opts.reference_audio_urls,
+      reference_video_urls: opts.reference_video_urls,
+      reference_context_note,
+      files_base_url: opts.files_base_url || files_base_url,
+      storage_local_path: opts.storage_local_path || storage_local_path,
+      video_gen_id,
+    });
   }
 
   // Seedance 2.0 自动注入角色音色参考（模型为 SD2 家族，或协议为 volcengine_omni；未显式指定 voice_reference_url 时）

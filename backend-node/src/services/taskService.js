@@ -52,10 +52,22 @@ function updateTaskError(db, taskId, errMsg) {
 function updateTaskResult(db, taskId, result) {
   const now = new Date().toISOString();
   const resultStr = typeof result === 'string' ? result : JSON.stringify(result || {});
-  db.prepare(
-    `UPDATE async_tasks SET status = 'completed', progress = 100, result = ?, completed_at = ?, updated_at = ?
-     WHERE id = ?`
-  ).run(resultStr, now, now, taskId);
+  try {
+    db.prepare(
+      `UPDATE async_tasks SET status = 'completed', progress = 100, result = ?, error = NULL, completed_at = ?, updated_at = ?
+       WHERE id = ?`
+    ).run(resultStr, now, now, taskId);
+  } catch (e) {
+    // 兼容尚未迁移 error 列的旧数据库。
+    if ((e.message || '').includes('error')) {
+      db.prepare(
+        `UPDATE async_tasks SET status = 'completed', progress = 100, result = ?, completed_at = ?, updated_at = ?
+         WHERE id = ?`
+      ).run(resultStr, now, now, taskId);
+    } else {
+      throw e;
+    }
+  }
 }
 
 function rowToTask(r) {
@@ -93,12 +105,33 @@ function cancelTask(db, log, taskId, reason) {
 }
 
 /**
- * 进程内 setImmediate 任务在重启后会丢失；启动时将遗留的 pending/processing 标为失败，避免前端无限轮询。
+ * 进程内 setImmediate 任务在重启后会丢失；启动时将无法自行恢复的 pending/processing 标为失败，
+ * 避免前端无限轮询。视频任务由 videoService 根据 provider_task_id 单独恢复。
  */
 function failOrphanedAsyncTasksOnStartup(db, log) {
   const rows = db.prepare(
     `SELECT id, type, status, resource_id FROM async_tasks
-     WHERE status IN ('pending', 'processing') AND deleted_at IS NULL`
+     WHERE status IN ('pending', 'processing')
+       AND deleted_at IS NULL
+       AND NOT (
+         (type = 'video_generation' AND EXISTS (
+           SELECT 1 FROM video_generations vg
+           WHERE vg.task_id = async_tasks.id
+             AND vg.status = 'processing'
+             AND vg.provider_task_id IS NOT NULL
+             AND TRIM(vg.provider_task_id) != ''
+             AND vg.deleted_at IS NULL
+         ))
+         OR
+         (type = 'image_generation' AND EXISTS (
+           SELECT 1 FROM image_generations ig
+           WHERE ig.task_id = async_tasks.id
+             AND ig.status = 'processing'
+             AND ig.provider_task_id IS NOT NULL
+             AND TRIM(ig.provider_task_id) != ''
+             AND ig.deleted_at IS NULL
+         ))
+       )`
   ).all();
   if (!rows.length) return 0;
   log.warn('Failing orphaned async tasks after startup', { count: rows.length });

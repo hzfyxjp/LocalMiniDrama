@@ -152,9 +152,11 @@ function ensureAllColumns(database) {
     { name: 'angle',             type: 'TEXT' },
     { name: 'movement',          type: 'TEXT' },
     { name: 'image_url',         type: 'TEXT' },
+    { name: 'remote_image_url',  type: 'TEXT' },
     { name: 'local_path',        type: 'TEXT' },
     { name: 'main_panel_idx',    type: 'INTEGER' },
     { name: 'video_url',         type: 'TEXT' },
+    { name: 'video_local_path',  type: 'TEXT' },
     { name: 'composed_image',    type: 'TEXT' },
     { name: 'result',            type: 'TEXT' },
     { name: 'emotion',           type: 'TEXT' },               // 当前情绪（兴奋/悲伤/紧张等）
@@ -176,6 +178,7 @@ function ensureAllColumns(database) {
     { name: 'first_frame_image_id', type: 'INTEGER' },
     { name: 'last_frame_image_id',  type: 'INTEGER' },
     { name: 'last_frame_image_url', type: 'TEXT' },
+    { name: 'last_frame_remote_image_url', type: 'TEXT' },
     { name: 'last_frame_local_path', type: 'TEXT' },
     { name: 'status',            type: 'TEXT DEFAULT \'draft\'' },
     { name: 'created_at',        type: 'TEXT' },
@@ -192,6 +195,7 @@ function ensureAllColumns(database) {
     { name: 'personality',       type: 'TEXT' },
     { name: 'appearance',        type: 'TEXT' },
     { name: 'image_url',         type: 'TEXT' },
+    { name: 'remote_image_url',  type: 'TEXT' },
     { name: 'local_path',        type: 'TEXT' },
     { name: 'extra_images',      type: 'TEXT' },
     { name: 'voice_style',       type: 'TEXT' },
@@ -201,6 +205,7 @@ function ensureAllColumns(database) {
     { name: 'style_tokens',      type: 'TEXT' },   // 风格词 token 列表
     { name: 'color_palette',     type: 'TEXT' },   // JSON: Hex 色值数组
     { name: 'four_view_image_url', type: 'TEXT' }, // 四视图参考图 URL
+    { name: 'four_view_remote_image_url', type: 'TEXT' }, // 四视图参考图原始公网 URL
     { name: 'polished_prompt',   type: 'TEXT' },   // 文字AI润色后的完整图片生成提示词（可编辑，生图时直接使用）
     { name: 'ref_image',         type: 'TEXT' },   // 用户上传的参考图（本地相对路径或 URL），独立于 AI 生成的主图
     { name: 'stages',            type: 'TEXT' },   // JSON: 多阶段造型 [{episode_range:[1,3], appearance:"..."}]
@@ -220,7 +225,9 @@ function ensureAllColumns(database) {
     { name: 'time',             type: 'TEXT' },
     { name: 'prompt',           type: 'TEXT' },
     { name: 'polished_prompt',  type: 'TEXT' },  // 文字AI润色后的完整四视图图片提示词，生图时直接使用
+    { name: 'polished_prompt_single', type: 'TEXT' }, // 场景单图专用提示词，避免复用四宫格文案
     { name: 'image_url',        type: 'TEXT' },
+    { name: 'remote_image_url', type: 'TEXT' },
     { name: 'local_path',       type: 'TEXT' },
     { name: 'extra_images',     type: 'TEXT' },
     { name: 'ref_image',        type: 'TEXT' },  // 用户上传的参考图（本地相对路径或 URL）
@@ -242,6 +249,7 @@ function ensureAllColumns(database) {
     { name: 'description', type: 'TEXT' },
     { name: 'prompt',      type: 'TEXT' },
     { name: 'image_url',    type: 'TEXT' },
+    { name: 'remote_image_url', type: 'TEXT' },
     { name: 'local_path',   type: 'TEXT' },
     { name: 'extra_images', type: 'TEXT' },
     { name: 'ref_image',    type: 'TEXT' },  // 用户上传的参考图（本地相对路径或 URL）
@@ -325,11 +333,13 @@ function ensureAllColumns(database) {
     { name: 'size',             type: 'TEXT' },
     { name: 'quality',          type: 'TEXT' },
     { name: 'image_url',        type: 'TEXT' },
+    { name: 'remote_image_url', type: 'TEXT' },
     { name: 'local_path',       type: 'TEXT' },
     { name: 'width',            type: 'INTEGER' },
     { name: 'height',           type: 'INTEGER' },
     { name: 'status',           type: 'TEXT' },
     { name: 'task_id',          type: 'TEXT' },
+    { name: 'provider_task_id', type: 'TEXT' },
     { name: 'completed_at',     type: 'TEXT' },
     { name: 'error_msg',        type: 'TEXT' },
     { name: 'created_at',       type: 'TEXT' },
@@ -393,6 +403,7 @@ function ensureAllColumns(database) {
     { name: 'type',         type: 'TEXT' },
     { name: 'category',     type: 'TEXT' },
     { name: 'url',          type: 'TEXT' },
+    { name: 'remote_url',   type: 'TEXT' },
     { name: 'local_path',   type: 'TEXT' },
     { name: 'file_size',    type: 'INTEGER' },
     { name: 'mime_type',    type: 'TEXT' },
@@ -412,6 +423,7 @@ function ensureAllColumns(database) {
     { name: 'name',              type: 'TEXT NOT NULL DEFAULT \'\'' },
     { name: 'category',          type: 'TEXT' },
     { name: 'image_url',         type: 'TEXT' },
+    { name: 'remote_image_url',  type: 'TEXT' },
     { name: 'local_path',        type: 'TEXT' },
     { name: 'description',       type: 'TEXT' },
     { name: 'appearance',        type: 'TEXT' },
@@ -422,6 +434,7 @@ function ensureAllColumns(database) {
     { name: 'style_tokens',      type: 'TEXT' },   // 风格词 token 列表
     { name: 'color_palette',     type: 'TEXT' },   // JSON: Hex 色值数组
     { name: 'four_view_image_url', type: 'TEXT' }, // 四视图参考图 URL（分镜图生图参考用）
+    { name: 'four_view_remote_image_url', type: 'TEXT' }, // 四视图参考图原始公网 URL
     { name: 'created_at',        type: 'TEXT' },
     { name: 'updated_at',        type: 'TEXT' },
     { name: 'deleted_at',        type: 'TEXT' },
@@ -435,6 +448,7 @@ function ensureAllColumns(database) {
     { name: 'prompt',      type: 'TEXT' },
     { name: 'description', type: 'TEXT' },
     { name: 'image_url',   type: 'TEXT' },
+    { name: 'remote_image_url', type: 'TEXT' },
     { name: 'local_path',  type: 'TEXT' },
     { name: 'category',    type: 'TEXT' },
     { name: 'tags',        type: 'TEXT' },
@@ -452,6 +466,7 @@ function ensureAllColumns(database) {
     { name: 'description', type: 'TEXT' },
     { name: 'prompt',      type: 'TEXT' },
     { name: 'image_url',   type: 'TEXT' },
+    { name: 'remote_image_url', type: 'TEXT' },
     { name: 'local_path',  type: 'TEXT' },
     { name: 'category',    type: 'TEXT' },
     { name: 'tags',        type: 'TEXT' },
@@ -517,6 +532,64 @@ function ensureAllColumns(database) {
       value      TEXT NOT NULL DEFAULT '',
       updated_at TEXT NOT NULL DEFAULT ''
     )`);
+  } catch (_) {}
+
+  // 旧版本把分镜图片和视频的本地路径都写进 storyboards.local_path。
+  // 先从视频生成历史回填独立的视频路径，再把主图路径恢复为图片记录中的路径。
+  try {
+    database.exec(`
+      UPDATE storyboards
+      SET video_local_path = (
+        SELECT vg.local_path
+        FROM video_generations vg
+        WHERE vg.storyboard_id = storyboards.id
+          AND vg.status = 'completed'
+          AND vg.deleted_at IS NULL
+          AND NULLIF(TRIM(vg.local_path), '') IS NOT NULL
+        ORDER BY COALESCE(vg.completed_at, vg.updated_at, vg.created_at) DESC, vg.id DESC
+        LIMIT 1
+      )
+      WHERE NULLIF(TRIM(video_local_path), '') IS NULL
+        AND EXISTS (
+          SELECT 1 FROM video_generations vg
+          WHERE vg.storyboard_id = storyboards.id
+            AND vg.status = 'completed'
+            AND vg.deleted_at IS NULL
+            AND NULLIF(TRIM(vg.local_path), '') IS NOT NULL
+        );
+
+      UPDATE storyboards
+      SET video_local_path = local_path
+      WHERE NULLIF(TRIM(video_local_path), '') IS NULL
+        AND (
+          LOWER(local_path) LIKE '%.mp4' OR LOWER(local_path) LIKE '%.mov'
+          OR LOWER(local_path) LIKE '%.m4v' OR LOWER(local_path) LIKE '%.webm'
+          OR LOWER(local_path) LIKE '%.mkv' OR LOWER(local_path) LIKE '%.avi'
+          OR LOWER(local_path) LIKE '%.mpeg' OR LOWER(local_path) LIKE '%.mpg'
+        );
+
+      UPDATE storyboards
+      SET local_path = (
+        SELECT ig.local_path
+        FROM image_generations ig
+        WHERE ig.id = storyboards.first_frame_image_id
+          AND ig.deleted_at IS NULL
+          AND NULLIF(TRIM(ig.local_path), '') IS NOT NULL
+        LIMIT 1
+      )
+      WHERE (
+          LOWER(local_path) LIKE '%.mp4' OR LOWER(local_path) LIKE '%.mov'
+          OR LOWER(local_path) LIKE '%.m4v' OR LOWER(local_path) LIKE '%.webm'
+          OR LOWER(local_path) LIKE '%.mkv' OR LOWER(local_path) LIKE '%.avi'
+          OR LOWER(local_path) LIKE '%.mpeg' OR LOWER(local_path) LIKE '%.mpg'
+        )
+        AND EXISTS (
+          SELECT 1 FROM image_generations ig
+          WHERE ig.id = storyboards.first_frame_image_id
+            AND ig.deleted_at IS NULL
+            AND NULLIF(TRIM(ig.local_path), '') IS NOT NULL
+        );
+    `);
   } catch (_) {}
 }
 

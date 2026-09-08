@@ -101,6 +101,202 @@ function inferProtocol(provider, model) {
   return 'openai';
 }
 
+function isPublicHttpUrl(url) {
+  return /^https?:\/\//i.test(String(url || '').trim()) && !/localhost|127\.0\.0\.1|0\.0\.0\.0/i.test(String(url || '').trim());
+}
+
+function isPublicFilesBaseUrl(filesBaseUrl) {
+  const base = String(filesBaseUrl || '').trim();
+  return /^https?:\/\//i.test(base) && !/localhost|127\.0\.0\.1|0\.0\.0\.0/i.test(base);
+}
+
+function publicUrlFromLocalRef(rawValue, filesBaseUrl) {
+  const raw = String(rawValue || '').trim();
+  const base = String(filesBaseUrl || '').trim().replace(/\/$/, '');
+  if (!raw) return null;
+  if (isPublicHttpUrl(raw)) return raw;
+  if (!isPublicFilesBaseUrl(base)) return null;
+  if (/^https?:\/\//i.test(raw)) {
+    const afterStatic = raw.split('/static/')[1];
+    if (afterStatic) return `${base}/${afterStatic.replace(/^\//, '')}`;
+    return null;
+  }
+  return `${base}/${raw.replace(/^\//, '')}`;
+}
+
+function parseConfigSettings(config) {
+  const raw = config?.settings;
+  if (!raw) return {};
+  if (typeof raw === 'object') return raw;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function buildAtImageReferencePrefix(referenceImageUrls, contextNote) {
+  const count = Math.min(Array.isArray(referenceImageUrls) ? referenceImageUrls.filter(Boolean).length : 0, 9);
+  if (count <= 0) return '';
+  const descByIndex = new Array(count).fill('');
+  const lines = String(contextNote || '')
+    .split('\n')
+    .map((line) => String(line || '').trim())
+    .filter(Boolean);
+  for (const line of lines) {
+    const m = line.match(/^(?:@image|Image)\s*(\d+)\s*[:=]\s*(.+)$/i);
+    if (!m) continue;
+    const idx = Number(m[1]) - 1;
+    if (idx >= 0 && idx < count) {
+      descByIndex[idx] = m[2].trim();
+    }
+  }
+  const mapped = [];
+  for (let i = 0; i < count; i++) {
+    mapped.push(`@image${i + 1} = ${descByIndex[i] || `第${i + 1}张参考图`}`);
+  }
+  return `参考图对应关系：\n${mapped.join('\n')}`;
+}
+
+async function resolveImageRefUrlOnlyAsync(rawValue, filesBaseUrl, storageLocalPath, log, tag) {
+  const raw = String(rawValue || '').trim();
+  if (!raw) return null;
+  if (isPublicHttpUrl(raw)) return raw;
+  const publicFromBase = publicUrlFromLocalRef(raw, filesBaseUrl);
+  if (publicFromBase) return publicFromBase;
+
+  if (raw.startsWith('data:')) {
+    const m = /^data:([^;]+);base64,([\s\S]+)$/i.exec(raw);
+    if (!m) return null;
+    try {
+      const mimeType = (m[1] || 'image/jpeg').trim();
+      const imageBuffer = Buffer.from(String(m[2] || '').replace(/\s/g, ''), 'base64');
+      if (!imageBuffer.length) return null;
+      return await uploadService.uploadToImageProxy(imageBuffer, mimeType, log, tag);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  if (storageLocalPath) {
+    return await uploadService.uploadLocalImageToProxy(storageLocalPath, raw, log, tag);
+  }
+  return null;
+}
+
+function pickAsyncImageUrl(payload) {
+  return payload?.data?.[0]?.url
+    || payload?.data?.url
+    || payload?.data?.image_url
+    || payload?.data?.imageUrl
+    || payload?.data?.result?.images?.[0]?.url
+    || payload?.data?.task_result?.images?.[0]?.url
+    || payload?.result?.images?.[0]?.url
+    || payload?.images?.[0]?.url
+    || payload?.url
+    || null;
+}
+
+function pickAsyncImageTaskId(payload) {
+  return payload?.data?.task_id
+    || payload?.data?.taskId
+    || payload?.task_id
+    || payload?.taskId
+    || payload?.request_id
+    || payload?.data?.id
+    || payload?.id
+    || null;
+}
+
+function normalizeRemoteImageUrl(url) {
+  const s = String(url || '').trim();
+  if (!/^https?:\/\//i.test(s)) return null;
+  if (/localhost|127\.0\.0\.1|0\.0\.0\.0/i.test(s)) return null;
+  return s;
+}
+
+function normalizeAsyncImageStatus(payload) {
+  const raw = payload?.data?.task_status
+    || payload?.data?.status
+    || payload?.task_status
+    || payload?.status
+    || payload?.state
+    || payload?.data?.state
+    || '';
+  return String(raw).trim().toLowerCase();
+}
+
+function buildOpenAIImageTaskQueryUrl(config, taskId) {
+  const base = (config.base_url || '').replace(/\/$/, '');
+  let ep = config.endpoint || '/v1/images/generations';
+  if (!ep.startsWith('/')) ep = '/' + ep;
+  const cfgQEp = config.query_endpoint
+    ? (config.query_endpoint.startsWith('/') ? config.query_endpoint : '/' + config.query_endpoint)
+    : '';
+  if (cfgQEp) {
+    return base + cfgQEp
+      .replace(/\{taskId\}/gi, encodeURIComponent(taskId))
+      .replace(/\{task_id\}/gi, encodeURIComponent(taskId))
+      .replace(/\{id\}/gi, encodeURIComponent(taskId));
+  }
+  return base + ep + '/' + encodeURIComponent(taskId);
+}
+
+/**
+ * 轮询 OpenAI 兼容异步图片任务。
+ * provider_task_id 已写入 image_generations 后，即使进程重启也可复用本函数继续查询。
+ */
+async function pollOpenAIImageTask(config, log, opts) {
+  const { image_gen_id, provider_task_id } = opts;
+  const apiKey = config.api_key || '';
+  const headers = {
+    'Content-Type': 'application/json',
+    Authorization: 'Bearer ' + apiKey,
+  };
+  const maxAttempts = 60;
+  const intervalMs = 4000;
+  const queryUrl = buildOpenAIImageTaskQueryUrl(config, provider_task_id);
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    await new Promise((r) => setTimeout(r, intervalMs));
+    try {
+      const queryRes = await fetch(queryUrl, { method: 'GET', headers });
+      if (!queryRes.ok) continue;
+      const queryData = JSON.parse(await queryRes.text());
+      const status = normalizeAsyncImageStatus(queryData);
+      log.info('[URL任务图生] 轮询状态', {
+        image_gen_id,
+        task_id: provider_task_id,
+        attempt,
+        status,
+      });
+      const imageUrl = pickAsyncImageUrl(queryData);
+      if (imageUrl && (!status || /succeed|success|completed|finished|done/.test(status))) {
+        return { image_url: imageUrl };
+      }
+      if (/succeed|success|completed|finished|done/.test(status)) {
+        return { error: '图片任务已完成，但返回里没有图片 URL' };
+      }
+      if (/fail|error|cancel/.test(status)) {
+        const errMsg = queryData?.data?.message
+          || queryData?.message
+          || queryData?.error?.message
+          || '任务失败';
+        return { error: '图片生成失败: ' + String(errMsg).slice(0, 300) };
+      }
+    } catch (e) {
+      log.warn('[URL任务图生] 轮询请求失败', {
+        attempt,
+        error: e.message,
+        image_gen_id,
+        task_id: provider_task_id,
+      });
+    }
+  }
+  return { error: '图片生成超时' };
+}
+
 /**
  * 获取默认图片配置：优先使用前端勾选的「默认」配置（is_default），同类型内按优先级（priority）排序；
  * 可选按 preferredProvider / preferredModel 进一步筛选。
@@ -515,6 +711,142 @@ async function callKlingImageApi(config, log, opts) {
     }
   }
   return { error: '可灵图片生成超时' };
+}
+
+/**
+ * URL-only 异步图生：
+ * POST /v1/images/generations
+ * GET  /v1/images/generations/{taskId}
+ * 请求体支持 reference_image_urls，参考图必须是公网 URL。
+ */
+async function callOpenAIImageTasksApi(config, log, opts) {
+  const {
+    prompt,
+    model,
+    size,
+    image_gen_id,
+    reference_image_urls,
+    files_base_url,
+    storage_local_path,
+    quality,
+    onTaskSubmitted,
+    resume_provider_task_id,
+  } = opts;
+  const base = (config.base_url || '').replace(/\/$/, '');
+  const apiKey = config.api_key || '';
+  const headers = {
+    'Content-Type': 'application/json',
+    Authorization: 'Bearer ' + apiKey,
+  };
+  let ep = config.endpoint || '/v1/images/generations';
+  if (!ep.startsWith('/')) ep = '/' + ep;
+  const submitUrl = base + ep;
+
+  if (resume_provider_task_id) {
+    log.info('[URL任务图生] 恢复上游任务轮询', {
+      image_gen_id,
+      task_id: resume_provider_task_id,
+    });
+    return pollOpenAIImageTask(config, log, {
+      image_gen_id,
+      provider_task_id: String(resume_provider_task_id).trim(),
+    });
+  }
+
+  const aspectRatio = klingImageAspectRatio(size);
+  const settings = parseConfigSettings(config);
+  const configuredResolution = String(settings.image_resolution || settings.resolution || quality || '').trim();
+
+  const rawRefs = Array.isArray(reference_image_urls) ? reference_image_urls.filter(Boolean) : [];
+  const resolvedRefs = [];
+  for (let i = 0; i < rawRefs.length; i++) {
+    const resolved = await resolveImageRefUrlOnlyAsync(
+      rawRefs[i],
+      files_base_url,
+      storage_local_path,
+      log,
+      `img_task_${image_gen_id || '0'}_${i}`
+    );
+    if (!resolved) {
+      return {
+        error: '该图片模型要求参考图必须是公网 URL。请配置 storage.base_url 为公网地址，或配置 image_proxy.upload_url 让本地图片先上传到图床。'
+      };
+    }
+    resolvedRefs.push(resolved);
+  }
+
+  const body = {
+    model,
+    prompt: prompt || '',
+    aspect_ratio: aspectRatio,
+    n: 1,
+    ...(configuredResolution ? { resolution: configuredResolution } : {}),
+    ...(resolvedRefs.length > 0 ? { reference_image_urls: resolvedRefs } : {}),
+  };
+  log.info('[URL任务图生] 提交请求', {
+    url: submitUrl,
+    image_gen_id,
+    model,
+    aspect_ratio: aspectRatio,
+    resolution: configuredResolution || '(default)',
+    ref_count: resolvedRefs.length,
+  });
+
+  let submitRaw;
+  let submitStatus;
+  try {
+    const out = await postJSONWithTimeout(submitUrl, headers, body, IMAGE_HTTP_TIMEOUT_MS);
+    submitStatus = out.statusCode;
+    submitRaw = out.raw;
+  } catch (e) {
+    log.error('[URL任务图生] 网络错误', { image_gen_id, error: e.message });
+    return { error: '图片生成网络请求失败: ' + e.message };
+  }
+
+  if (submitStatus < 200 || submitStatus >= 300) {
+    let errMsg = '图片生成请求失败: ' + submitStatus;
+    try {
+      const errJson = JSON.parse(submitRaw);
+      const msg = errJson.error?.message || errJson.message || errJson.msg || errJson.error;
+      if (msg) errMsg += ' - ' + String(msg).slice(0, 300);
+    } catch (_) {
+      if (submitRaw) errMsg += ' - ' + submitRaw.slice(0, 300);
+    }
+    return { error: errMsg };
+  }
+
+  let submitData;
+  try {
+    submitData = JSON.parse(submitRaw);
+  } catch (_) {
+    return { error: '图片生成返回格式异常: ' + submitRaw.slice(0, 200) };
+  }
+
+  const directUrl = pickAsyncImageUrl(submitData);
+  if (directUrl) return { image_url: directUrl };
+
+  const taskId = pickAsyncImageTaskId(submitData);
+  if (!taskId) {
+    return { error: '图片生成未返回 task_id: ' + submitRaw.slice(0, 200) };
+  }
+
+  if (onTaskSubmitted) {
+    try {
+      await onTaskSubmitted(String(taskId).trim());
+    } catch (e) {
+      log.error('[URL任务图生] 上游 task_id 保存失败', {
+        image_gen_id,
+        task_id: taskId,
+        error: e.message,
+      });
+      return { error: '图片任务 ID 保存失败: ' + e.message };
+    }
+  }
+
+  return pollOpenAIImageTask(config, log, {
+    image_gen_id,
+    provider_task_id: String(taskId).trim(),
+  });
 }
 
 /**
@@ -1410,7 +1742,10 @@ async function callImageApi(db, log, opts) {
     files_base_url,
     storage_local_path,
     system_prompt,
+    reference_context_note,
     user_negative_prompt,
+    onTaskSubmitted,
+    resume_provider_task_id,
   } = opts;
   const preferredProvider = preferred_provider ?? opts.preferredProvider;
   const config = getDefaultImageConfig(db, preferredModel, preferredProvider, imageServiceType);
@@ -1421,15 +1756,26 @@ async function callImageApi(db, log, opts) {
   const provider = (config.provider || '').toLowerCase();
   // api_protocol 显式指定接口规范，优先级高于 provider 推断；未设置时按 provider 自动判断
   const protocol = (config.api_protocol || '').toLowerCase() || inferProtocol(provider, model);
+  if (opts.resume_provider_task_id && protocol !== 'openai_image_tasks') {
+    return { error: '图片任务恢复失败：当前图片配置已不是 OpenAI 兼容异步协议' };
+  }
 
   // ── 参考图标签注入：为所有非 Gemini 模型将标签注入 prompt 文本 ─────────────────────────────
   // Gemini 通过 parts 结构处理（interleaved text+image），不需要文字注入。
   // 其他所有模型（Doubao/DashScope/NanoBanana/OpenAI-compat 等）通过文字告知模型各参考图用途，
   // 避免模型模仿参考图的宫格/四视图布局，同时抑制生成分割画面。
   let effectivePrompt = prompt || '';
+  const hasRefs = Array.isArray(reference_image_urls) && reference_image_urls.length > 0;
+  if (protocol === 'openai_image_tasks' && hasRefs) {
+    const refHeader = buildAtImageReferencePrefix(reference_image_urls, reference_context_note || system_prompt);
+    if (refHeader) {
+      effectivePrompt = `${refHeader}\n\n${effectivePrompt}`;
+    }
+  }
   if (
     protocol !== 'gemini' &&
-    Array.isArray(reference_image_urls) && reference_image_urls.length > 0 &&
+    hasRefs &&
+    protocol !== 'openai_image_tasks' &&
     system_prompt
   ) {
     const refLines = String(system_prompt).split('\n').filter(l => /^Image\s+\d+:/i.test(l));
@@ -1487,6 +1833,18 @@ async function callImageApi(db, log, opts) {
       reference_image_urls: opts.reference_image_urls,
       files_base_url: opts.files_base_url,
       storage_local_path: opts.storage_local_path,
+    });
+  }
+
+  if (protocol === 'openai_image_tasks') {
+    return callOpenAIImageTasksApi(config, log, {
+      prompt: effectivePrompt, model, size, image_gen_id,
+      reference_image_urls: opts.reference_image_urls,
+      files_base_url: opts.files_base_url,
+      storage_local_path: opts.storage_local_path,
+      quality,
+      onTaskSubmitted,
+      resume_provider_task_id,
     });
   }
 
@@ -1722,21 +2080,22 @@ function createAndGenerateImage(db, log, opts) {
           projectSubdir
         );
       } catch (_) {}
+      const remoteImageUrl = normalizeRemoteImageUrl(result.image_url);
       // 兼容旧库无 completed_at：先试完整 UPDATE，失败则只更新必有列
       try {
         db.prepare(
-          'UPDATE image_generations SET status = ?, image_url = ?, local_path = ?, completed_at = ?, updated_at = ? WHERE id = ?'
-        ).run('completed', result.image_url, localPath, now2, now2, imageGenId);
+          'UPDATE image_generations SET status = ?, image_url = ?, remote_image_url = ?, local_path = ?, completed_at = ?, updated_at = ? WHERE id = ?'
+        ).run('completed', result.image_url, remoteImageUrl, localPath, now2, now2, imageGenId);
       } catch (e) {
         if ((e.message || '').includes('completed_at')) {
           db.prepare(
-            'UPDATE image_generations SET status = ?, image_url = ?, local_path = ?, updated_at = ? WHERE id = ?'
-          ).run('completed', result.image_url, localPath, now2, imageGenId);
+            'UPDATE image_generations SET status = ?, image_url = ?, remote_image_url = ?, local_path = ?, updated_at = ? WHERE id = ?'
+          ).run('completed', result.image_url, remoteImageUrl, localPath, now2, imageGenId);
         } else {
           throw e;
         }
       }
-      taskService.updateTaskResult(db, taskId, { image_generation_id: imageGenId, image_url: result.image_url, local_path: localPath, status: 'completed' });
+      taskService.updateTaskResult(db, taskId, { image_generation_id: imageGenId, image_url: result.image_url, remote_image_url: remoteImageUrl, local_path: localPath, status: 'completed' });
       if (charIdNum != null) {
         try {
           // 旧图追加到 extra_images，与上传逻辑保持一致
@@ -1753,8 +2112,9 @@ function createAndGenerateImage(db, log, opts) {
             image_url: result.image_url,
             local_path: localPath,
           });
-          db.prepare('UPDATE characters SET image_url = ?, local_path = ?, extra_images = ?, updated_at = ? WHERE id = ?').run(
+          db.prepare('UPDATE characters SET image_url = ?, remote_image_url = ?, local_path = ?, extra_images = ?, updated_at = ? WHERE id = ?').run(
             result.image_url,
+            remoteImageUrl,
             localPath,
             extraJson,
             now2,
@@ -1762,7 +2122,7 @@ function createAndGenerateImage(db, log, opts) {
           );
         } catch (e) {
           if ((e.message || '').includes('local_path') || (e.message || '').includes('extra_images')) {
-            db.prepare('UPDATE characters SET image_url = ?, updated_at = ? WHERE id = ?').run(result.image_url, now2, charIdNum);
+            db.prepare('UPDATE characters SET image_url = ?, remote_image_url = ?, updated_at = ? WHERE id = ?').run(result.image_url, remoteImageUrl, now2, charIdNum);
           } else {
             throw e;
           }
@@ -1779,8 +2139,9 @@ function createAndGenerateImage(db, log, opts) {
           if (!Array.isArray(extras)) extras = [];
           if (oldPath && !extras.includes(oldPath)) extras.push(oldPath);
           const extraJson = extras.length ? JSON.stringify(extras) : null;
-          db.prepare('UPDATE scenes SET image_url = ?, local_path = ?, extra_images = ?, updated_at = ? WHERE id = ?').run(
+          db.prepare('UPDATE scenes SET image_url = ?, remote_image_url = ?, local_path = ?, extra_images = ?, updated_at = ? WHERE id = ?').run(
             result.image_url,
+            remoteImageUrl,
             localPath,
             extraJson,
             now2,
@@ -1788,7 +2149,7 @@ function createAndGenerateImage(db, log, opts) {
           );
         } catch (e) {
           if ((e.message || '').includes('local_path') || (e.message || '').includes('extra_images')) {
-            db.prepare('UPDATE scenes SET image_url = ?, updated_at = ? WHERE id = ?').run(result.image_url, now2, sceneIdNum);
+            db.prepare('UPDATE scenes SET image_url = ?, remote_image_url = ?, updated_at = ? WHERE id = ?').run(result.image_url, remoteImageUrl, now2, sceneIdNum);
           } else {
             throw e;
           }
@@ -1844,6 +2205,7 @@ function rowToItem(r) {
     local_path: r.local_path,
     status: r.status,
     task_id: r.task_id,
+    provider_task_id: r.provider_task_id,
     error_msg: r.error_msg,
     created_at: r.created_at,
     updated_at: r.updated_at,

@@ -10,7 +10,7 @@ function routes(db, cfg, log, uploadService) {
     getOne: (req, res) => {
       try {
         const row = db.prepare(
-          'SELECT id, drama_id, name, role, appearance, description, personality, voice_style, image_url, local_path, polished_prompt, four_view_image_url, identity_anchors, seedance2_asset, seedance2_voice_asset, negative_prompt, updated_at FROM characters WHERE id = ? AND deleted_at IS NULL'
+          'SELECT id, drama_id, name, role, appearance, description, personality, voice_style, image_url, remote_image_url, local_path, polished_prompt, four_view_image_url, four_view_remote_image_url, identity_anchors, seedance2_asset, seedance2_voice_asset, negative_prompt, updated_at FROM characters WHERE id = ? AND deleted_at IS NULL'
         ).get(Number(req.params.id));
         if (!row) return response.notFound(res, '角色不存在');
         if (row.seedance2_asset) {
@@ -159,7 +159,7 @@ function routes(db, cfg, log, uploadService) {
         const body = req.body || {};
         const charIdNum = Number(req.params.id);
         const prevFull = db
-          .prepare('SELECT id, local_path, image_url, seedance2_asset FROM characters WHERE id = ? AND deleted_at IS NULL')
+          .prepare('SELECT id, local_path, image_url, remote_image_url, seedance2_asset FROM characters WHERE id = ? AND deleted_at IS NULL')
           .get(charIdNum);
         if (!prevFull) return response.notFound(res, '角色不存在');
         const nextImg = body.image_url !== undefined ? body.image_url : prevFull.image_url;
@@ -180,9 +180,12 @@ function routes(db, cfg, log, uploadService) {
         }
         const extraFields = [];
         const extraParams = [];
+        if (body.remote_image_url !== undefined) { extraFields.push('remote_image_url = ?'); extraParams.push(body.remote_image_url ?? null); }
         if (body.local_path !== undefined) { extraFields.push('local_path = ?'); extraParams.push(body.local_path ?? null); }
         if (body.extra_images !== undefined) { extraFields.push('extra_images = ?'); extraParams.push(body.extra_images ?? null); }
         if (body.ref_image !== undefined) { extraFields.push('ref_image = ?'); extraParams.push(body.ref_image ?? null); }
+        if (body.four_view_image_url !== undefined) { extraFields.push('four_view_image_url = ?'); extraParams.push(body.four_view_image_url ?? null); }
+        if (body.four_view_remote_image_url !== undefined) { extraFields.push('four_view_remote_image_url = ?'); extraParams.push(body.four_view_remote_image_url ?? null); }
         if (extraFields.length > 0) {
           db.prepare(`UPDATE characters SET ${extraFields.join(', ')}, updated_at = ? WHERE id = ?`).run(
             ...extraParams, new Date().toISOString(), Number(req.params.id)

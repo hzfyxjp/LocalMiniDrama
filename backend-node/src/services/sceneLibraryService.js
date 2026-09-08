@@ -16,6 +16,7 @@ function rowToItem(r) {
     prompt: r.prompt,
     description: r.description,
     image_url: r.image_url,
+    remote_image_url: r.remote_image_url ?? null,
     local_path: r.local_path,
     category: r.category,
     tags: r.tags,
@@ -68,6 +69,7 @@ function createLibraryItem(db, log, req) {
     prompt: req.prompt ?? null,
     description: req.description ?? null,
     image_url: req.image_url || '',
+    remote_image_url: req.remote_image_url ?? null,
     local_path: req.local_path ?? null,
     category: req.category ?? null,
     tags: req.tags ?? null,
@@ -95,6 +97,7 @@ function updateLibraryItem(db, log, id, req) {
   if (req.prompt != null) { updates.push('prompt = ?'); params.push(req.prompt); }
   if (req.description != null) { updates.push('description = ?'); params.push(req.description); }
   if (req.image_url != null) { updates.push('image_url = ?'); params.push(req.image_url); }
+  if (req.remote_image_url != null) { updates.push('remote_image_url = ?'); params.push(req.remote_image_url); }
   if (req.local_path != null) { updates.push('local_path = ?'); params.push(req.local_path); }
   if (req.category != null) { updates.push('category = ?'); params.push(req.category); }
   if (req.tags != null) { updates.push('tags = ?'); params.push(req.tags); }
@@ -129,6 +132,7 @@ function sceneLibraryFields(scene, dramaId, imageUrl, now) {
     prompt: scene.prompt || null,
     description: scene.prompt || null,
     image_url: imageUrl,
+    remote_image_url: scene.remote_image_url || null,
     local_path: scene.local_path || null,
     source_type: 'scene',
     source_id: normalizeSourceId(scene.id),

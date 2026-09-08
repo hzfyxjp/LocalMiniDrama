@@ -380,10 +380,12 @@ function rowToStoryboard(r) {
       first_frame_image_id: r.first_frame_image_id ?? null,
       last_frame_image_id: r.last_frame_image_id ?? null,
       last_frame_image_url: sanitizeImageUrl(r.last_frame_image_url),
+      last_frame_remote_image_url: r.last_frame_remote_image_url ?? null,
       last_frame_local_path: r.last_frame_local_path ?? null,
       characters: parseStoryboardCharacters(r.characters),
       composed_image: r.composed_image,
       image_url: sanitizeImageUrl(r.image_url),
+      remote_image_url: r.remote_image_url ?? null,
       local_path: r.local_path ?? null,
       main_panel_idx: r.main_panel_idx != null ? Number(r.main_panel_idx) : null,
       video_url: r.video_url,
@@ -407,6 +409,7 @@ function rowToCharacter(r) {
     personality: r.personality,
     voice_style: r.voice_style,
     image_url: sanitizeImageUrl(r.image_url),
+    remote_image_url: r.remote_image_url ?? null,
     local_path: r.local_path,
     extra_images: r.extra_images || null,
     ref_image: r.ref_image || null,
@@ -417,6 +420,7 @@ function rowToCharacter(r) {
     polished_prompt: r.polished_prompt || null,
     negative_prompt: r.negative_prompt || null,
     four_view_image_url: r.four_view_image_url || null,
+    four_view_remote_image_url: r.four_view_remote_image_url || null,
     seedance2_asset: parseJsonColumn(r.seedance2_asset),
     seedance2_voice_asset: parseJsonColumn(r.seedance2_voice_asset),
     created_at: r.created_at,
@@ -432,9 +436,11 @@ function rowToScene(r) {
     time: r.time,
     prompt: r.prompt,
     polished_prompt: r.polished_prompt || null,
+    polished_prompt_single: r.polished_prompt_single || null,
     negative_prompt: r.negative_prompt || null,
     storyboard_count: r.storyboard_count ?? 1,
     image_url: sanitizeImageUrl(r.image_url),
+    remote_image_url: r.remote_image_url ?? null,
     local_path: r.local_path,
     extra_images: r.extra_images || null,
     ref_image: r.ref_image || null,
@@ -454,6 +460,7 @@ function rowToProp(r) {
     description: r.description,
     prompt: r.prompt,
     image_url: sanitizeImageUrl(r.image_url),
+    remote_image_url: r.remote_image_url ?? null,
     local_path: r.local_path,
     extra_images: r.extra_images || null,
     ref_image: r.ref_image || null,
@@ -746,8 +753,14 @@ function saveCanvasLayout(db, log, dramaId, req) {
  * 取某分镜的视频地址：优先使用用户手动选定的 storyboard.video_url，否则取最新完成的 video_generations 记录
  */
 function getVideoUrlForStoryboard(db, storyboardId, baseUrl) {
+  const isLikelyVideoRef = (value) => {
+    const s = String(value || '').trim().toLowerCase();
+    if (!s) return false;
+    return /\.(mp4|mov|m4v|webm|mkv|avi|mpeg|mpg)(?:[?#].*)?$/.test(s);
+  };
+
   // 1. 获取 storyboard 表中的视频信息（代表用户选定或上次同步的结果）
-  const sb = db.prepare('SELECT video_url, local_path, updated_at FROM storyboards WHERE id = ? AND deleted_at IS NULL').get(storyboardId);
+  const sb = db.prepare('SELECT video_url, video_local_path, updated_at FROM storyboards WHERE id = ? AND deleted_at IS NULL').get(storyboardId);
   
   // 2. 获取 video_generations 表中最新完成的记录
   const vg = db.prepare(
@@ -756,23 +769,27 @@ function getVideoUrlForStoryboard(db, storyboardId, baseUrl) {
 
   // 辅助函数：构造完整 URL，优先使用本地路径（避免远程URL过期导致无法合并）
   const buildUrl = (videoUrl, localPath) => {
-    if (localPath && String(localPath).trim() && baseUrl) {
+    if (localPath && String(localPath).trim() && baseUrl && isLikelyVideoRef(localPath)) {
       const base = (baseUrl || '').replace(/\/$/, '');
       const p = String(localPath).replace(/^\//, '');
       return p ? base + '/' + p : null;
     }
-    if (videoUrl && String(videoUrl).trim()) return videoUrl;
+    if (videoUrl && String(videoUrl).trim() && isLikelyVideoRef(videoUrl)) return videoUrl;
     return null;
   };
 
-  const sbUrl = sb ? buildUrl(sb.video_url, sb.local_path) : null;
+  const sbUrl = sb ? buildUrl(sb.video_url, sb.video_local_path) : null;
   const vgUrl = vg ? buildUrl(vg.video_url, vg.local_path) : null;
+  const sbHasVideoLocalPath = sb && isLikelyVideoRef(sb.video_local_path);
 
   // 策略：比较时间，取最新的
   // 如果只有其中一个有 URL，直接用那个
   if (sbUrl && !vgUrl) return sbUrl;
   if (!sbUrl && vgUrl) return vgUrl;
   if (!sbUrl && !vgUrl) return null;
+
+  // 独立视频路径缺失时，回到真实的视频生成记录。
+  if (!sbHasVideoLocalPath && vgUrl) return vgUrl;
 
   // 都有 URL，比较时间
   // sb 使用 updated_at

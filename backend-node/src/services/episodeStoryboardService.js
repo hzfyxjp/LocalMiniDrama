@@ -1348,35 +1348,7 @@ function rebuildVideoPromptForStoryboard(db, log, storyboardId) {
 
   const videoRatio = dramaAspectRatio || cfg?.style?.default_video_ratio || '16:9';
 
-  let charNames = [];
-  if (row.characters) {
-    try {
-      const arr = typeof row.characters === 'string' ? JSON.parse(row.characters) : row.characters;
-      if (Array.isArray(arr)) {
-        charNames = arr
-          .map((c) => {
-            if (typeof c === 'string') return c;
-            if (c && typeof c === 'object') return c.name;
-            return null;
-          })
-          .filter(Boolean);
-      }
-    } catch (_) {}
-  }
-
-  const charRows = loadCharactersForStoryboardPrompt(db, sbId, charNames);
-  const characterAppearances = buildCharacterAppearanceText(db, sbId, charNames);
-  const characterVoiceMap = buildVoiceAnchorMap(charRows);
-  const characterVoiceAnchors = buildCharacterVoiceAnchors(db, sbId, charNames);
-
-  const sbForPrompt = {
-    ...row,
-    character_appearances: characterAppearances,
-    character_voice_map: characterVoiceMap,
-    character_voice_anchors: characterVoiceAnchors,
-  };
-
-  const videoPrompt = generateVideoPrompt(sbForPrompt, finalStyle, videoRatio);
+  const videoPrompt = generateVideoPrompt(row, finalStyle, videoRatio);
   const now = new Date().toISOString();
   db.prepare('UPDATE storyboards SET video_prompt = ?, updated_at = ? WHERE id = ?').run(videoPrompt, now, sbId);
 
@@ -1384,7 +1356,6 @@ function rebuildVideoPromptForStoryboard(db, log, storyboardId) {
     log.info('[分镜] 已按最新规则重建 video_prompt', {
       id: sbId,
       len: videoPrompt.length,
-      has_voice_anchors: !!characterVoiceAnchors,
     });
   }
 

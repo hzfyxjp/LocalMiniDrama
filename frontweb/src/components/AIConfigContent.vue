@@ -19,7 +19,11 @@
                 导入配置
               </el-button>
               <input ref="importFileRef" type="file" accept=".json" style="display:none" @change="importConfigs" />
-              <el-button type="success" plain @click="openOneKeyVolc">
+              <el-button type="success" plain @click="openOneKeyXxImage">
+                <el-icon><MagicStick /></el-icon>
+                一键配置 xx-image
+              </el-button>
+              <!-- <el-button type="success" plain @click="openOneKeyVolc">
                 <el-icon><MagicStick /></el-icon>
                 一键配置火山
               </el-button>
@@ -31,7 +35,7 @@
                 <el-icon><MagicStick /></el-icon>
                 一键配置通义
                 <span class="one-key-not-recommended">不推荐</span>
-              </el-button>
+              </el-button> -->
             </div>
             <div class="actions-right">
               <transition name="fade-slide">
@@ -322,8 +326,10 @@
               <el-icon class="tip-icon" style="cursor:pointer;color:#409eff" @click="showProtocolHelp = true"><QuestionFilled /></el-icon>
             </span>
           </template>
-          <el-select v-model="form.api_protocol" style="width: 100%" placeholder="选择接口规范（自定义厂商必选）" clearable>
+          <el-select v-model="form.api_protocol" style="width: 100%" placeholder="选择接口规范（自定义厂商必选）" clearable @change="onProtocolChange">
             <el-option label="OpenAI 兼容（大多数中转站默认）" value="openai" />
+            <el-option label="OpenAI 兼容异步图生（reference_image_urls + task_id）" value="openai_image_tasks" />
+            <el-option label="OpenAI 兼容异步视频生成（reference_image_urls + task_id）" value="openai_video_tasks" />
             <el-option label="火山引擎（豆包 Seedream / Seedance）" value="volcengine" />
             <el-option label="火山即梦 Seedance 全能（方舟多图参考，Seedance 2.0 等）" value="volcengine_omni" />
             <el-option label="通义万象 DashScope" value="dashscope" />
@@ -349,6 +355,25 @@
                   <b>适用场景：</b>OpenAI 官方、各类中转/代理站（ChatFire、硅基流动等）<br>
                   <b>Endpoint：</b><code>POST /v1/images/generations</code><br>
                   <pre>{ "model": "dall-e-3", "prompt": "...", "n": 1, "size": "1024x1024" }</pre>
+                </div>
+              </el-collapse-item>
+              <el-collapse-item name="openai-task-img">
+                <template #title><span class="ph-tag ph-tag-img">图片</span> OpenAI 兼容异步图生 — <code>reference_image_urls</code> + <code>task_id</code></template>
+                <div class="ph-body">
+                  <b>Endpoint：</b><code>POST /v1/images/generations</code><br>
+                  <b>轮询：</b><code>GET /v1/images/generations/{taskId}</code><br>
+                  <b>特点：</b>参考图字段为 <code>reference_image_urls</code>，且要求传入<strong>公网 URL</strong>，不走 base64。<br>
+                  <pre>{ "model": "gpt-image-2-4k-xx1", "prompt": "...", "aspect_ratio": "1:1", "n": 1, "reference_image_urls": ["https://example.com/reference.jpg"] }</pre>
+                </div>
+              </el-collapse-item>
+              <el-collapse-item name="openai-task-vid">
+                <template #title><span class="ph-tag ph-tag-vid">视频</span> OpenAI 兼容异步视频生成 — <code>reference_image_urls</code> + <code>task_id</code></template>
+                <div class="ph-body">
+                  <b>Endpoint：</b><code>POST /v1/videos</code><br>
+                  <b>轮询：</b><code>GET /v1/videos/{taskId}</code><br>
+                  <b>特点：</b>参考图/参考音频/参考视频都必须是<strong>公网 URL</strong>，不走 base64。<br>
+                  <pre>{ "model": "sd2-pro-933-480-xx1", "prompt": "...", "aspect_ratio": "16:9", "seconds": "10", "reference_image_urls": ["https://example.com/reference.jpg"] }
+{ "model": "video-sd25-480p-xx1", "prompt": "...", "duration": 10, "aspect_ratio": "16:9", "reference_image_urls": ["https://example.com/reference.jpg"] }</pre>
                 </div>
               </el-collapse-item>
               <el-collapse-item name="volcengine-img">
@@ -620,6 +645,46 @@ input_reference = (图片文件，可选)</pre>
               <code>/kling/v1/images/omni-image/{taskId}</code>。详见
               <a href="https://klingai.com/document-api/apiReference/model/OmniVideo" target="_blank" rel="noopener noreferrer">OmniVideo</a>。
             </p>
+          </el-form-item>
+        </template>
+        <template v-if="(form.service_type === 'image' || form.service_type === 'storyboard_image') && form.api_protocol === 'openai_image_tasks'">
+          <el-form-item>
+            <template #label>
+              <span class="form-label-tip">Resolution
+                <el-tooltip placement="top" popper-class="cfg-tip-popper">
+                  <template #content>
+                    <div class="cfg-tip-content">
+                      可选分辨率参数，按目标渠道要求填写，如 <code>4k</code>、<code>2k</code>。<br>
+                      若渠道不要求，可留空。
+                    </div>
+                  </template>
+                  <el-icon class="tip-icon"><QuestionFilled /></el-icon>
+                </el-tooltip>
+              </span>
+            </template>
+            <el-input v-model="form.image_task_resolution" placeholder="如 4k（可留空）" />
+          </el-form-item>
+        </template>
+        <template v-if="form.service_type === 'image' || form.service_type === 'storyboard_image' || form.service_type === 'video'">
+          <el-form-item>
+            <template #label>
+              <span class="form-label-tip">素材公网URL
+                <el-tooltip placement="top" popper-class="cfg-tip-popper">
+                  <template #content>
+                    <div class="cfg-tip-content">
+                      开启后，当前配置生成图片/视频时，会优先把素材保存的原始公网图链传给模型。<br>
+                      若素材没有公网图链，仍回退到现有本地路径/图床逻辑。
+                    </div>
+                  </template>
+                  <el-icon class="tip-icon"><QuestionFilled /></el-icon>
+                </el-tooltip>
+              </span>
+            </template>
+            <el-switch
+              v-model="form.use_remote_image_url"
+              active-text="开启"
+              inactive-text="关闭"
+            />
           </el-form-item>
         </template>
         <!-- TTS 专属字段：声音 ID 和 MiniMax Group ID -->
@@ -954,6 +1019,48 @@ input_reference = (图片文件，可选)</pre>
       </template>
     </el-dialog>
 
+    <!-- 一键配置 xx-image -->
+    <el-dialog
+      v-model="oneKeyXxImageVisible"
+      title="一键配置 xx-image（xx1 系列）"
+      width="520px"
+      :close-on-click-modal="false"
+      @closed="oneKeyXxImageKey = ''"
+    >
+      <div class="one-key-help">
+        <div class="one-key-section">
+          <div class="one-key-section-title">📋 将自动创建以下配置</div>
+          <ul class="one-key-list">
+            <li><b>文本生成图片</b>：GPT Image xx1（gpt-image-2-4k-xx1、gpt-image-2-xx1）</li>
+            <li><b>分镜图片生成</b>：GPT Image xx1（支持参考图 URL）</li>
+            <li><b>异步视频生成</b>：SD2 / Veo / Hailuo xx1 系列（支持 task_id 轮询）</li>
+          </ul>
+        </div>
+        <div class="one-key-section">
+          <div class="one-key-section-title">🔗 接口地址</div>
+          <p class="one-key-note"><code>https://xx-image.com</code>，图片使用 <code>/v1/images/generations</code>，视频使用 <code>/v1/videos</code>。</p>
+          <p class="one-key-note">参考图会按项目的公网 URL / 图床策略传给模型；视频生成完成后会自动下载本地归档。</p>
+        </div>
+      </div>
+      <el-form label-width="0" style="margin-top: 8px">
+        <el-form-item>
+          <el-input
+            v-model="oneKeyXxImageKey"
+            type="password"
+            placeholder="请输入 xx-image API Key"
+            show-password-on="click"
+            clearable
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="oneKeyXxImageVisible = false">取消</el-button>
+        <el-button type="success" :loading="oneKeyXxImageSaving" :disabled="!oneKeyXxImageKey.trim()" @click="submitOneKeyXxImage">
+          确定，一键创建配置
+        </el-button>
+      </template>
+    </el-dialog>
+
     <!-- 一键配置 Agnes -->
     <el-dialog
       v-model="oneKeyAgnesVisible"
@@ -1183,6 +1290,8 @@ const form = ref({
   query_endpoint: '',
   modelText: '',
   default_model: '',
+  image_task_resolution: '',
+  use_remote_image_url: false,
   deepseek_thinking: 'disabled',
   deepseek_reasoning_effort: 'high',
   priority: 0,
@@ -1255,6 +1364,16 @@ function onPresetModelSelect(value) {
   form.value.modelText = (form.value.modelText || '').trim() + append
   presetModelPick.value = ''
 }
+
+function isXxImageAsyncProtocol(protocol) {
+  return protocol === 'openai_image_tasks' || protocol === 'openai_video_tasks'
+}
+
+function onProtocolChange(protocol) {
+  if (isXxImageAsyncProtocol(protocol)) {
+    form.value.base_url = 'https://xx-image.com'
+  }
+}
 const rules = computed(() => ({
   service_type: [{ required: true, message: '请选择服务类型', trigger: 'change' }],
   name: [{ required: true, message: '请输入名称', trigger: 'blur' }],
@@ -1292,6 +1411,9 @@ const oneKeyVolcSaving = ref(false)
 const oneKeyAgnesVisible = ref(false)
 const oneKeyAgnesKey = ref('')
 const oneKeyAgnesSaving = ref(false)
+const oneKeyXxImageVisible = ref(false)
+const oneKeyXxImageKey = ref('')
+const oneKeyXxImageSaving = ref(false)
 
 /** 预设厂商与模型（与参考前端一致） */
 const providerConfigs = {
@@ -1313,6 +1435,7 @@ const providerConfigs = {
     { id: 'openai', name: 'OpenAI', models: ['dall-e-3', 'dall-e-2'] },
     { id: 'dashscope', name: '通义万象', models: ['wan2.6-image', 'qwen-image-edit-plus-2026-01-09', 'qwen-image-edit-plus', 'qwen-image-edit-max'] },
     { id: 'qwen_image', name: '通义千问', models: ['qwen-image-max', 'qwen-image-plus', 'qwen-image'] },
+    { id: 'xx_image', name: 'xx-image（xx1 异步图生）', models: ['gpt-image-2-4k-xx1', 'gpt-image-2-xx1'] },
     { id: 'agnes', name: 'Agnes AI', models: ['agnes-image-2.1-flash', 'agnes-image-2.0-flash'] }
   ],
   storyboard_image: [
@@ -1323,6 +1446,7 @@ const providerConfigs = {
     // { id: 'chatfire', name: 'Chatfire', models: ['nano-banana-pro', 'doubao-seedream-4-5-251128', 'qwen-image'] },
     { id: 'gemini', name: 'Google Gemini', models: ['gemini-2.5-flash-image', 'gemini-2.5-flash-image-preview', 'gemini-3.1-flash-image-preview', 'gemini-3-pro-image-preview'] },
     { id: 'openai', name: 'OpenAI', models: ['dall-e-3', 'dall-e-2'] },
+    { id: 'xx_image', name: 'xx-image（xx1 异步图生）', models: ['gpt-image-2-4k-xx1', 'gpt-image-2-xx1'] },
     { id: 'agnes', name: 'Agnes AI', models: ['agnes-image-2.1-flash', 'agnes-image-2.0-flash'] }
   ],
   video: [
@@ -1336,6 +1460,7 @@ const providerConfigs = {
     { id: 'minimax', name: 'MiniMax 海螺', models: ['MiniMax-Hailuo-2.3', 'MiniMax-Hailuo-2.3-Fast', 'MiniMax-Hailuo-02'] },
     { id: 'gemini', name: 'Google Gemini (Veo)', models: ['veo-3.1-generate-preview', 'veo-3.0-generate-preview', 'veo-3.0-fast-generate-preview'] },
     { id: 'dashscope', name: '通义万相', models: ['wan2.6-r2v-flash', 'wan2.6-t2v', 'wan2.2-kf2v-flash', 'wan2.6-i2v-flash', 'wanx2.1-vace-plus'] },
+    { id: 'xx_image', name: 'xx-image（xx1 异步视频）', models: ['sd2-fast-xx1', 'sd2-mini-xx1', 'sd2-pro-933-480-xx1', 'sd2-pro-max-480-xx1', 'sd2-pro-max-fast-xx1', 'sd2-pro-max-xx1', 'sd2-pro-xx1', 'video-sd25-480p-xx1', 'veo-omni-flash-ref-xx1', 'hailuo-h3-xx1'] },
     {
       id: 'jimeng_ai_api',
       name: 'Jimeng AI API（自建即梦免费 API）',
@@ -1385,8 +1510,16 @@ const providerProtocolMap = {
   qwen: 'openai',
   deepseek: 'openai',
   agnes: 'openai',
+  xx_image: 'openai_video_tasks',
   jimeng_ai_api: 'jimeng_ai_api',
   jimeng_material_api: '',
+}
+
+function getProtocolForProvider(provider, serviceType) {
+  if (provider === 'xx_image') {
+    return serviceType === 'video' ? 'openai_video_tasks' : 'openai_image_tasks'
+  }
+  return providerProtocolMap[provider] || (serviceType === 'text' ? '' : 'openai')
 }
 
 /** 厂商 id → 默认 Base URL（与参考前端 AIConfigDialog 757-775 一致） */
@@ -1411,6 +1544,7 @@ function getBaseUrlForProvider(provider) {
   if (p === 'jimeng_material_api') return 'https://silvamux.tingyutech.com'
   if (p === 'xai' || p === 'grok') return 'https://api.x.ai'
   if (p === 'agnes') return 'https://apihub.agnes-ai.com/v1'
+  if (p === 'xx_image') return 'https://xx-image.com'
   return 'https://api.chatfire.site/v1'
 }
 
@@ -1425,6 +1559,16 @@ function parseSettings(settings) {
   } catch (_) {
     return {}
   }
+}
+
+function isTruthyConfigValue(value) {
+  if (value === true || value === 1) return true
+  const s = String(value || '').trim().toLowerCase()
+  return s === '1' || s === 'true' || s === 'yes' || s === 'on'
+}
+
+function isImageReferenceServiceType(serviceType) {
+  return serviceType === 'image' || serviceType === 'storyboard_image' || serviceType === 'video'
 }
 
 function isDeepSeekOfficial(provider, baseUrl) {
@@ -1507,6 +1651,10 @@ const endpointPreviewInfo = computed(() => {
   } else if (service_type === 'image' || service_type === 'storyboard_image') {
     if (endpoint) {
       submitPath = endpoint
+      if (query_endpoint) queryPath = query_endpoint
+    } else if (proto === 'openai_image_tasks') {
+      submitPath = '/v1/images/generations'
+      queryPath = query_endpoint || '/v1/images/generations/{taskId}'
     } else if (proto === 'volcengine' || p === 'volcengine' || p === 'volces') {
       submitPath = '/images/generations'
     } else if (proto === 'dashscope' || p === 'dashscope' || p === 'qwen_image') {
@@ -1558,6 +1706,9 @@ const endpointPreviewInfo = computed(() => {
         query: null,
         isAuto: true,
       }
+    } else if (proto === 'openai_video_tasks') {
+      submitPath = '/v1/videos'
+      queryPath = query_endpoint || '/v1/videos/{taskId}'
     } else if (proto === 'kling_omni' || p === 'ffir' || p === 'klingai') {
       const omniFfir = p === 'ffir' || /ffir\.cn/i.test(base)
       const omniKlingOfficial = p === 'klingai' || /api(-beijing|-singapore)?\.klingai\.com/i.test(base)
@@ -1643,7 +1794,7 @@ function onProviderChange(providerId) {
     form.value.deepseek_reasoning_effort = 'high'
   }
   // 自动填充接口规范
-  form.value.api_protocol = providerProtocolMap[providerId] || (st === 'text' ? '' : 'openai')
+  form.value.api_protocol = getProtocolForProvider(providerId, st)
   if (st === 'video' && providerId === 'jimeng_ai_api') {
     form.value.endpoint = ''
     form.value.query_endpoint = ''
@@ -1702,6 +1853,39 @@ const AGNES_CONFIGS = [
   { service_type: 'video', name: 'Agnes 视频', base_url: 'https://apihub.agnes-ai.com/v1', provider: 'agnes', api_protocol: 'agnes', endpoint: '/videos', query_endpoint: '/videos/{taskId}', model: ['agnes-video-v2.0'] },
 ]
 
+/** xx-image 一键配置：图片和视频使用不同的异步 OpenAI 兼容协议 */
+const XX_IMAGE_CONFIGS = [
+  {
+    service_type: 'image',
+    name: 'xx-image GPT Image 文本生图',
+    api_protocol: 'openai_image_tasks',
+    model: ['gpt-image-2-4k-xx1', 'gpt-image-2-xx1'],
+  },
+  {
+    service_type: 'storyboard_image',
+    name: 'xx-image GPT Image 分镜图',
+    api_protocol: 'openai_image_tasks',
+    model: ['gpt-image-2-4k-xx1', 'gpt-image-2-xx1'],
+  },
+  {
+    service_type: 'video',
+    name: 'xx-image xx1 异步视频',
+    api_protocol: 'openai_video_tasks',
+    model: [
+      'sd2-fast-xx1',
+      'sd2-mini-xx1',
+      'sd2-pro-933-480-xx1',
+      'sd2-pro-max-480-xx1',
+      'sd2-pro-max-fast-xx1',
+      'sd2-pro-max-xx1',
+      'sd2-pro-xx1',
+      'video-sd25-480p-xx1',
+      'veo-omni-flash-ref-xx1',
+      'hailuo-h3-xx1',
+    ],
+  },
+]
+
 function serviceTypeLabel(t) {
   const map = {
     text: '文本',
@@ -1757,6 +1941,8 @@ function resetForm() {
     query_endpoint: '',
     modelText: '',
     default_model: '',
+    image_task_resolution: '',
+    use_remote_image_url: false,
     deepseek_thinking: 'disabled',
     deepseek_reasoning_effort: 'high',
     priority: 0,
@@ -1786,6 +1972,8 @@ function openEdit(row) {
   let kling_access_key = ''
   let kling_secret_key = ''
   let kling_secret_key_base64 = false
+  let image_task_resolution = ''
+  let use_remote_image_url = false
   const deepseekSettings = resolveDeepSeekFormSettings(row)
   if (row.settings) {
     try {
@@ -1798,6 +1986,12 @@ function openEdit(row) {
         kling_access_key = s.kling_access_key || ''
         kling_secret_key = s.kling_secret_key || ''
         kling_secret_key_base64 = !!s.kling_secret_key_base64
+      }
+      if ((row.service_type === 'image' || row.service_type === 'storyboard_image') && row.api_protocol === 'openai_image_tasks') {
+        image_task_resolution = s.image_resolution || s.resolution || ''
+      }
+      if (isImageReferenceServiceType(row.service_type)) {
+        use_remote_image_url = isTruthyConfigValue(s.use_remote_image_url)
       }
     } catch (_) {}
   }
@@ -1812,6 +2006,8 @@ function openEdit(row) {
     query_endpoint: row.query_endpoint || '',
     modelText: modelList.join('\n'),
     default_model: defaultInList ? row.default_model : (modelList[0] || ''),
+    image_task_resolution,
+    use_remote_image_url,
     deepseek_thinking: deepseekSettings.thinking,
     deepseek_reasoning_effort: deepseekSettings.effort,
     priority: row.priority ?? 0,
@@ -1860,6 +2056,12 @@ async function submit() {
       if (form.value.kling_secret_key_base64) baseS.kling_secret_key_base64 = true
       else delete baseS.kling_secret_key_base64
       settings = Object.keys(baseS).length ? JSON.stringify(baseS) : null
+    } else if ((form.value.service_type === 'image' || form.value.service_type === 'storyboard_image') && form.value.api_protocol === 'openai_image_tasks') {
+      const prev = editingId.value ? list.value.find((r) => r.id === editingId.value) : null
+      const baseS = parseSettings(prev?.settings)
+      if ((form.value.image_task_resolution || '').trim()) baseS.image_resolution = form.value.image_task_resolution.trim()
+      else delete baseS.image_resolution
+      settings = Object.keys(baseS).length ? JSON.stringify(baseS) : null
     } else if (isDeepSeekOfficialForm.value) {
       const prev = editingId.value ? list.value.find((r) => r.id === editingId.value) : null
       const baseS = parseSettings(prev?.settings)
@@ -1869,6 +2071,13 @@ async function submit() {
       } else {
         delete baseS.deepseek_reasoning_effort
       }
+      settings = Object.keys(baseS).length ? JSON.stringify(baseS) : null
+    }
+    if (isImageReferenceServiceType(form.value.service_type)) {
+      const prev = editingId.value ? list.value.find((r) => r.id === editingId.value) : null
+      const baseS = settings !== undefined ? parseSettings(settings) : parseSettings(prev?.settings)
+      if (form.value.use_remote_image_url) baseS.use_remote_image_url = true
+      else delete baseS.use_remote_image_url
       settings = Object.keys(baseS).length ? JSON.stringify(baseS) : null
     }
     const payload = {
@@ -2108,6 +2317,41 @@ async function submitOneKeyVolc() {
 function openOneKeyAgnes() {
   oneKeyAgnesKey.value = ''
   oneKeyAgnesVisible.value = true
+}
+
+function openOneKeyXxImage() {
+  oneKeyXxImageKey.value = ''
+  oneKeyXxImageVisible.value = true
+}
+
+async function submitOneKeyXxImage() {
+  const apiKey = oneKeyXxImageKey.value.trim()
+  if (!apiKey) return
+  oneKeyXxImageSaving.value = true
+  try {
+    for (const cfg of XX_IMAGE_CONFIGS) {
+      const models = cfg.model || []
+      await aiAPI.create({
+        service_type: cfg.service_type,
+        name: cfg.name,
+        provider: 'xx_image',
+        api_protocol: cfg.api_protocol,
+        base_url: 'https://xx-image.com',
+        api_key: apiKey,
+        model: models,
+        default_model: models[0] || null,
+        priority: 10,
+        is_default: true,
+      })
+    }
+    ElMessage.success('已创建 xx-image 文本生图、分镜图、异步视频配置')
+    oneKeyXxImageVisible.value = false
+    await loadList()
+  } catch (_) {
+    // 错误已由 request 统一提示
+  } finally {
+    oneKeyXxImageSaving.value = false
+  }
 }
 
 async function submitOneKeyAgnes() {

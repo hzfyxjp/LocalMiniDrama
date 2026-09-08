@@ -141,7 +141,10 @@ function createLibraryItem(db, log, req) {
     name: req.name || '',
     category: req.category ?? null,
     image_url: req.image_url || '',
+    remote_image_url: req.remote_image_url ?? null,
     local_path: req.local_path ?? null,
+    four_view_image_url: req.four_view_image_url ?? null,
+    four_view_remote_image_url: req.four_view_remote_image_url ?? null,
     description: req.description ?? null,
     tags: req.tags ?? null,
     source_type: sourceType,
@@ -168,7 +171,10 @@ function updateLibraryItem(db, log, id, req) {
   if (req.description != null) { updates.push('description = ?'); params.push(req.description); }
   if (req.tags != null) { updates.push('tags = ?'); params.push(req.tags); }
   if (req.image_url != null) { updates.push('image_url = ?'); params.push(req.image_url); }
+  if (req.remote_image_url != null) { updates.push('remote_image_url = ?'); params.push(req.remote_image_url); }
   if (req.local_path != null) { updates.push('local_path = ?'); params.push(req.local_path); }
+  if (req.four_view_image_url != null) { updates.push('four_view_image_url = ?'); params.push(req.four_view_image_url); }
+  if (req.four_view_remote_image_url != null) { updates.push('four_view_remote_image_url = ?'); params.push(req.four_view_remote_image_url); }
   if (req.source_type != null) { updates.push('source_type = ?'); params.push(req.source_type); }
   if (req.source_id != null) { updates.push('source_id = ?'); params.push(normalizeSourceId(req.source_id)); }
   if (updates.length === 0) return getLibraryItem(db, id);
@@ -247,7 +253,10 @@ function addCharacterToLibrary(db, log, characterId, category) {
     name: charRow.name,
     category: category ?? null,
     image_url: imageUrl,
+    remote_image_url: charRow.remote_image_url || null,
     local_path: charRow.local_path || null,
+    four_view_image_url: charRow.four_view_image_url || null,
+    four_view_remote_image_url: charRow.four_view_remote_image_url || null,
     description: charRow.description || null,
     source_type: 'character',
     source_id: normalizeSourceId(charRow.id),
@@ -281,7 +290,10 @@ function addCharacterToMaterialLibrary(db, log, characterId) {
     drama_id: null,
     name: charRow.name,
     image_url: imageUrl,
+    remote_image_url: charRow.remote_image_url || null,
     local_path: charRow.local_path || null,
+    four_view_image_url: charRow.four_view_image_url || null,
+    four_view_remote_image_url: charRow.four_view_remote_image_url || null,
     description: charRow.description || null,
     source_type: 'character',
     source_id: normalizeSourceId(charRow.id),
@@ -382,7 +394,10 @@ function rowToItem(r) {
     name: r.name,
     category: r.category,
     image_url: r.image_url,
+    remote_image_url: r.remote_image_url ?? null,
     local_path: r.local_path,
+    four_view_image_url: r.four_view_image_url ?? null,
+    four_view_remote_image_url: r.four_view_remote_image_url ?? null,
     description: r.description,
     tags: r.tags,
     source_type: r.source_type || 'generated',

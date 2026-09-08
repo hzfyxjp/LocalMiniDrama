@@ -87,7 +87,7 @@ function createStoryboard(db, log, req) {
 function updateStoryboard(db, log, id, req) {
   const row = db.prepare('SELECT id FROM storyboards WHERE id = ? AND deleted_at IS NULL').get(Number(id));
   if (!row) return null;
-  const allowed = ['title', 'description', 'location', 'time', 'duration', 'dialogue', 'narration', 'action', 'result', 'atmosphere', 'image_prompt', 'polished_prompt', 'video_prompt', 'scene_id', 'characters', 'composed_image', 'image_url', 'local_path', 'main_panel_idx', 'video_url', 'audio_local_path', 'narration_audio_local_path', 'status', 'shot_type', 'angle', 'angle_h', 'angle_v', 'angle_s', 'movement', 'segment_index', 'segment_title', 'creation_mode', 'universal_segment_text', 'layout_description', 'first_frame_image_id', 'last_frame_image_id', 'last_frame_image_url', 'last_frame_local_path'];
+  const allowed = ['title', 'description', 'location', 'time', 'duration', 'dialogue', 'narration', 'action', 'result', 'atmosphere', 'image_prompt', 'polished_prompt', 'video_prompt', 'scene_id', 'characters', 'composed_image', 'image_url', 'remote_image_url', 'local_path', 'main_panel_idx', 'video_url', 'video_local_path', 'audio_local_path', 'narration_audio_local_path', 'status', 'shot_type', 'angle', 'angle_h', 'angle_v', 'angle_s', 'movement', 'segment_index', 'segment_title', 'creation_mode', 'universal_segment_text', 'layout_description', 'first_frame_image_id', 'last_frame_image_id', 'last_frame_image_url', 'last_frame_remote_image_url', 'last_frame_local_path'];
   const updates = [];
   const params = [];
   // 前端可能传 character_ids，与 characters 统一：存为 JSON 字符串
@@ -186,14 +186,17 @@ function getStoryboardById(db, id) {
     first_frame_image_id: r.first_frame_image_id ?? null,
     last_frame_image_id: r.last_frame_image_id ?? null,
     last_frame_image_url: r.last_frame_image_url ?? null,
+    last_frame_remote_image_url: r.last_frame_remote_image_url ?? null,
     last_frame_local_path: r.last_frame_local_path ?? null,
     characters,
     prop_ids: propIds,
     composed_image: r.composed_image,
     image_url: r.image_url ?? null,
+    remote_image_url: r.remote_image_url ?? null,
     local_path: r.local_path ?? null,
     main_panel_idx: r.main_panel_idx != null ? Number(r.main_panel_idx) : null,
     video_url: r.video_url,
+    video_local_path: r.video_local_path ?? null,
     audio_local_path: r.audio_local_path ?? null,
     narration_audio_local_path: r.narration_audio_local_path ?? null,
     status: r.status || 'pending',

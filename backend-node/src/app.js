@@ -21,6 +21,9 @@ function createApp() {
   const taskService = require('./services/taskService');
   taskService.failOrphanedAsyncTasksOnStartup(db, log);
 
+  const imageService = require('./services/imageService');
+  imageService.resumeProcessingImageGenerations(db, log);
+
   const { resumeProcessingVideoGenerations } = require('./services/videoService');
   resumeProcessingVideoGenerations(db, log);
 
