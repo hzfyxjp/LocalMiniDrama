@@ -1,0 +1,58 @@
+name: Build Mac
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  build_mac:
+    runs-on: macos‑15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # electron二进制国内镜像
+      - name: set electron mirror
+        run: |
+          echo "ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/" >> $GITHUB_ENV
+          echo "ELECTRON_BUILDER_BINARIES_MIRROR=https://cdn.npmmirror.com/binaries/electron-builder-binaries/" >> $GITHUB_ENV
+          echo "CSC_IDENTITY_AUTO_DISCOVERY=false" >> $GITHUB_ENV
+
+      # 1.前端frontweb依赖
+      - name: install frontweb
+        working-directory: frontweb
+        run: npm ci
+
+      # 2.backend-node后端依赖
+      - name: install backend-node
+        working-directory: backend-node
+        run: npm ci
+
+      # 3.desktop(electron主项目)依赖
+      - name: install desktop deps
+        working-directory: desktop
+        run: npm ci
+
+      # 给dist‑mac.sh执行权限，修复换行
+      - name: prepare dist‑mac.sh
+        working-directory: desktop
+        run: |
+          chmod +x dist-mac.sh
+          sed -i '' 's/\r$//' dist-mac.sh
+
+      # 运行你的打包脚本 dist‑mac.sh（脚本就在desktop目录）
+      - name: run dist‑mac.sh
+        working-directory: desktop
+        run: ./dist-mac.sh
+
+      # 上传产物，脚本输出在 desktop/release
+      - name: upload mac artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac‑build
+          path: desktop/release/*.dmg
+          retention-days: 7
