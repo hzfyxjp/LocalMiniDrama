@@ -68,6 +68,7 @@
               <el-option label="5秒" :value="5" />
               <el-option label="8秒" :value="8" />
               <el-option label="10秒" :value="10" />
+              <el-option label="30秒" :value="30" />
             </el-select>
           </div>
         </div>

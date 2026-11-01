@@ -1,6 +1,7 @@
 // 与 Go pkg/ai + application/services/ai_service 对齐：读取 ai_service_configs，调用 OpenAI 兼容的 chat completions
 const aiConfigService = require('./aiConfigService');
 const { applyDeepSeekChatOptions } = require('./deepseekConfig');
+const { isXxImageTextConfig, extractChatMessageText, buildXxImageChatBody } = require('./xxImageChat');
 const https = require('https');
 const http = require('http');
 
@@ -36,10 +37,7 @@ function postJSONNonStream(url, headers, body, timeoutMs = 120000) {
         }
         try {
           const json = JSON.parse(raw);
-          // 兼容标准 OpenAI 格式与推理模型
-          const content = json.choices?.[0]?.message?.content
-            || json.choices?.[0]?.message?.reasoning_content
-            || null;
+          const content = extractChatMessageText(json) || null;
           resolve({ status: res.statusCode, body: content, raw });
         } catch (_) {
           resolve({ status: res.statusCode, body: null, raw });
@@ -336,19 +334,48 @@ async function generateText(db, log, serviceType, userPrompt, systemPrompt, opti
   };
   body = applyDeepSeekChatOptions(config, body);
   const startMs = Date.now();
-  log.info('AI generateText request', { url: url.slice(0, 60), model, max_tokens: finalMaxTokens ?? '(model default)', json_mode, stream: true });
-  const res = await postJSONStream(url, { Authorization: 'Bearer ' + (config.api_key || '') }, body, 60000, (receivedLen, event, accumulated) => {
-    if (event === 'first_token') {
-      log.info('AI stream first token', { model, ttft_ms: Date.now() - startMs });
-    } else if (receivedLen > 0 && receivedLen % 500 < 20) {
-      // 每积累约 500 字符记录一次进度
-      log.info('AI stream progress', { model, received_chars: receivedLen, elapsed_ms: Date.now() - startMs });
-    }
-    // 调用者提供的流式回调（如分镜增量解析），传入当前已积累的完整文本
-    if (streamCallback && accumulated) streamCallback(accumulated);
+  const useXxImageChat = isXxImageTextConfig(config, model);
+  if (useXxImageChat) {
+    body = buildXxImageChatBody({
+      model,
+      messages: body.messages,
+      temperature,
+      maxTokens: finalMaxTokens,
+      jsonMode: json_mode,
+    });
+  }
+  log.info('AI generateText request', {
+    url: url.slice(0, 80),
+    model,
+    max_tokens: finalMaxTokens ?? '(model default)',
+    json_mode,
+    stream: !useXxImageChat,
+    xx_image_chat: useXxImageChat,
   });
-  // 流式模式下 res.body 已是拼接好的完整文本内容（非 JSON）
-  const content = res.body;
+  let content = '';
+  if (useXxImageChat) {
+    const res = await postJSONNonStream(
+      url,
+      { Authorization: 'Bearer ' + (config.api_key || '') },
+      body,
+      180000
+    );
+    content = res.body || '';
+    if (streamCallback && content) streamCallback(content);
+    if (!content) {
+      log.error('AI xx-image 返回内容为空', { model, status: res.status, raw_response: (res.raw || '').slice(0, 300) });
+    }
+  } else {
+    const res = await postJSONStream(url, { Authorization: 'Bearer ' + (config.api_key || '') }, body, 60000, (receivedLen, event, accumulated) => {
+      if (event === 'first_token') {
+        log.info('AI stream first token', { model, ttft_ms: Date.now() - startMs });
+      } else if (receivedLen > 0 && receivedLen % 500 < 20) {
+        log.info('AI stream progress', { model, received_chars: receivedLen, elapsed_ms: Date.now() - startMs });
+      }
+      if (streamCallback && accumulated) streamCallback(accumulated);
+    });
+    content = res.body;
+  }
   const elapsedMs = Date.now() - startMs;
   if (!content) {
     throw new Error('AI 返回内容为空');
@@ -433,13 +460,40 @@ async function streamGenerateText(db, log, serviceType, userPrompt, systemPrompt
   body = applyDeepSeekChatOptions(config, body);
   const silenceMs = options.silence_timeout_ms != null ? Number(options.silence_timeout_ms) : 120000;
   const startMs = Date.now();
+  const useXxImageChat = isXxImageTextConfig(config, model);
+  if (useXxImageChat) {
+    body = buildXxImageChatBody({
+      model,
+      messages: body.messages,
+      temperature,
+      maxTokens: finalMaxTokens,
+      jsonMode: json_mode,
+    });
+  }
   log.info('AI streamGenerateText request', {
-    url: url.slice(0, 60),
+    url: url.slice(0, 80),
     model,
     max_tokens: finalMaxTokens ?? '(model default)',
     json_mode,
-    stream: true,
+    stream: !useXxImageChat,
+    xx_image_chat: useXxImageChat,
   });
+  if (useXxImageChat) {
+    const res = await postJSONNonStream(
+      url,
+      { Authorization: 'Bearer ' + (config.api_key || '') },
+      body,
+      Math.max(180000, silenceMs)
+    );
+    const content = res.body || '';
+    if (!content) {
+      log.error('AI xx-image 流式回退返回为空', { model, status: res.status, raw_response: (res.raw || '').slice(0, 300) });
+      throw new Error('AI 返回内容为空');
+    }
+    if (onDelta) onDelta(content);
+    log.info('AI streamGenerateText done', { model, text_length: content.length, elapsed_ms: Date.now() - startMs, xx_image_chat: true });
+    return content;
+  }
   let lastLen = 0;
   const res = await postJSONStream(
     url,
@@ -547,6 +601,7 @@ async function generateTextWithVision(db, log, serviceType, userPrompt, systemPr
   const model = getModelFromConfig(config, preferredModel);
   const url = buildChatUrl(config);
 
+  const useXxImageChat = isXxImageTextConfig(config, model);
   log.info('[Vision] 开始请求', {
     config_id: config.id,
     config_name: config.name,
@@ -554,6 +609,7 @@ async function generateTextWithVision(db, log, serviceType, userPrompt, systemPr
     base_url: config.base_url,
     model,
     is_reasoning_model: /^o\d/i.test(model),
+    xx_image_chat: useXxImageChat,
     max_tokens: Number(max_tokens),
     ...imageLogInfo,
   });
@@ -587,6 +643,13 @@ async function generateTextWithVision(db, log, serviceType, userPrompt, systemPr
     // 推理模型不支持 temperature，跳过
     ...(isReasoningModel ? {} : { temperature: Number(temperature) }),
   };
+  if (useXxImageChat) {
+    body.stream = false;
+    body.top_p = 1.0;
+    body.frequency_penalty = 0.0;
+    body.enable_thinking = false;
+    body.web_search = false;
+  }
 
   const startMs = Date.now();
   let res;
@@ -708,4 +771,5 @@ module.exports = {
   EXTRACT_PROMPTS,
   isRefusalResponse,
   postJSONWithTimeout,
+  isXxImageTextConfig,
 };

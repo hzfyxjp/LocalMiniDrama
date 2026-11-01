@@ -32,6 +32,11 @@ function isXx1Sd2VideoModel(modelName) {
   return /^sd2(?:[-_./]|$)/.test(m) || /(?:^|[-_./])sd2(?:[-_./]|$)/.test(m);
 }
 
+function isXx1Sd25FixedDurationModel(modelName) {
+  const m = String(modelName || '').trim().toLowerCase();
+  return m === 'video-sd25-30s-xx1' || /video-sd25-30s/.test(m);
+}
+
 /** 每种服务类型只保留一个默认：若有多个 is_default=1，只保留优先级最高（同优先级取 id 最小）的那条 */
 function ensureSingleDefaultPerType(db) {
   const types = ['text', 'image', 'storyboard_image', 'video', 'tts', 'jimeng2_character_auth', 'model_ark_asset'];
@@ -87,7 +92,9 @@ function createConfig(db, log, req) {
     queryEndpoint = '/v1/videos/{taskId}';
   } else if (!endpoint && req.provider) {
     const p = req.provider.toLowerCase();
-    if (p === 'openai') {
+    if (p === 'xx_image' && st === 'text') {
+      endpoint = '/v1/chat/completions';
+    } else if (p === 'openai') {
       if (st === 'text') endpoint = '/chat/completions';
       else if (st === 'image') endpoint = '/images/generations';
       else if (st === 'video') {
@@ -385,6 +392,7 @@ async function testConnection(opts) {
       const url = base + path;
       const body = { model: model || '', prompt: 'test connectivity', aspect_ratio: '1:1', n: 1 };
       if (isXx1Sd2VideoModel(model)) body.seconds = '1';
+      else if (isXx1Sd25FixedDurationModel(model)) body.duration = 5;
       else body.duration = 1;
       console.log('[testConnection] xx1 视频服务', { url, serviceType, model, body });
       const res = await fetch(url, {

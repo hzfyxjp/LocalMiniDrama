@@ -136,6 +136,31 @@ function parseConfigSettings(config) {
   }
 }
 
+/** OpenAI DALL·E / gpt-image 的 quality 值，不能当作 xx-image 的 resolution 发送 */
+const OPENAI_IMAGE_QUALITY_VALUES = new Set(['standard', 'hd', 'auto', 'low', 'medium', 'high']);
+
+function isXxImage4kModel(model) {
+  return /4k/i.test(String(model || ''));
+}
+
+/**
+ * openai_image_tasks 只发送渠道认的分辨率（如 4k、2k）。
+ * 角色/场景生图会带 quality=standard；gpt-image-2-4k-xx1 会校验该字段，转成 4k。
+ */
+function pickOpenAIImageTaskResolution(settings, model) {
+  const candidates = [
+    settings && settings.image_resolution,
+    settings && settings.resolution,
+  ];
+  for (const raw of candidates) {
+    const value = String(raw || '').trim();
+    if (!value) continue;
+    if (OPENAI_IMAGE_QUALITY_VALUES.has(value.toLowerCase())) continue;
+    return value;
+  }
+  return isXxImage4kModel(model) ? '4k' : '';
+}
+
 function buildAtImageReferencePrefix(referenceImageUrls, contextNote) {
   const count = Math.min(Array.isArray(referenceImageUrls) ? referenceImageUrls.filter(Boolean).length : 0, 9);
   if (count <= 0) return '';
@@ -728,7 +753,6 @@ async function callOpenAIImageTasksApi(config, log, opts) {
     reference_image_urls,
     files_base_url,
     storage_local_path,
-    quality,
     onTaskSubmitted,
     resume_provider_task_id,
   } = opts;
@@ -755,7 +779,7 @@ async function callOpenAIImageTasksApi(config, log, opts) {
 
   const aspectRatio = klingImageAspectRatio(size);
   const settings = parseConfigSettings(config);
-  const configuredResolution = String(settings.image_resolution || settings.resolution || quality || '').trim();
+  const configuredResolution = pickOpenAIImageTaskResolution(settings, model);
 
   const rawRefs = Array.isArray(reference_image_urls) ? reference_image_urls.filter(Boolean) : [];
   const resolvedRefs = [];
@@ -1842,7 +1866,6 @@ async function callImageApi(db, log, opts) {
       reference_image_urls: opts.reference_image_urls,
       files_base_url: opts.files_base_url,
       storage_local_path: opts.storage_local_path,
-      quality,
       onTaskSubmitted,
       resume_provider_task_id,
     });
@@ -2273,6 +2296,7 @@ module.exports = {
   getDefaultImageConfig,
   callImageApi,
   createAndGenerateImage,
+  pickOpenAIImageTaskResolution,
   resolveAssetUserNegativeForApi,
   getStoryboardReferenceLimits,
   canAddStoryboardCharacterRef,

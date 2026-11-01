@@ -372,6 +372,7 @@
             <el-option label="10秒/段" :value="10" />
             <el-option label="12秒/段" :value="12" />
             <el-option label="15秒/段" :value="15" />
+            <el-option label="30秒/段" :value="30" />
           </el-select>
           <el-select v-model="scriptLanguage" placeholder="分镜语言" clearable style="width: 105px">
             <el-option label="中文" value="zh" />

@@ -373,7 +373,9 @@
                   <b>轮询：</b><code>GET /v1/videos/{taskId}</code><br>
                   <b>特点：</b>参考图/参考音频/参考视频都必须是<strong>公网 URL</strong>，不走 base64。<br>
                   <pre>{ "model": "sd2-pro-933-480-xx1", "prompt": "...", "aspect_ratio": "16:9", "seconds": "10", "reference_image_urls": ["https://example.com/reference.jpg"] }
-{ "model": "video-sd25-480p-xx1", "prompt": "...", "duration": 10, "aspect_ratio": "16:9", "reference_image_urls": ["https://example.com/reference.jpg"] }</pre>
+{ "model": "video-sd25-480p-xx1", "prompt": "...", "duration": 10, "aspect_ratio": "16:9", "reference_image_urls": ["https://example.com/reference.jpg"] }
+{ "model": "video-sd25-30s-xx1", "prompt": "...", "duration": 30, "aspect_ratio": "16:9", "reference_image_urls": ["https://example.com/reference.jpg"] }</pre>
+                  <p><code>video-sd25-30s-xx1</code> 按次计费，<code>duration</code> 只能是 <code>5</code> 或 <code>30</code>。</p>
                 </div>
               </el-collapse-item>
               <el-collapse-item name="volcengine-img">
@@ -1031,14 +1033,15 @@ input_reference = (图片文件，可选)</pre>
         <div class="one-key-section">
           <div class="one-key-section-title">📋 将自动创建以下配置</div>
           <ul class="one-key-list">
+            <li><b>文本生成</b>：gpt-5.6-terra（OpenAI Chat Completions）</li>
             <li><b>文本生成图片</b>：GPT Image xx1（gpt-image-2-4k-xx1、gpt-image-2-xx1）</li>
             <li><b>分镜图片生成</b>：GPT Image xx1（支持参考图 URL）</li>
-            <li><b>异步视频生成</b>：SD2 / Veo / Hailuo xx1 系列（支持 task_id 轮询）</li>
+            <li><b>异步视频生成</b>：SD2 / Veo / Hailuo / Seedance 2.5 xx1（含 video-sd25-30s-xx1，时长仅 5 或 30 秒）</li>
           </ul>
         </div>
         <div class="one-key-section">
           <div class="one-key-section-title">🔗 接口地址</div>
-          <p class="one-key-note"><code>https://xx-image.com</code>，图片使用 <code>/v1/images/generations</code>，视频使用 <code>/v1/videos</code>。</p>
+          <p class="one-key-note"><code>https://xx-image.com</code>，文本使用 <code>/v1/chat/completions</code>，图片使用 <code>/v1/images/generations</code>，视频使用 <code>/v1/videos</code>。</p>
           <p class="one-key-note">参考图会按项目的公网 URL / 图床策略传给模型；视频生成完成后会自动下载本地归档。</p>
         </div>
       </div>
@@ -1424,7 +1427,8 @@ const providerConfigs = {
     { id: 'gemini', name: 'Google Gemini', models: ['gemini-2.5-pro', 'gemini-3-flash-preview'] },
     { id: 'deepseek', name: 'DeepSeek', models: ['deepseek-v4-flash', 'deepseek-v4-pro'] },
     { id: 'qwen', name: '通义千问', models: ['qwen3-max', 'qwen-plus', 'qwen-flash'] },
-    { id: 'agnes', name: 'Agnes AI', models: ['agnes-2.0-flash'] }
+    { id: 'agnes', name: 'Agnes AI', models: ['agnes-2.0-flash'] },
+    { id: 'xx_image', name: 'xx-image', models: ['gpt-5.6-terra'] }
   ],
   image: [
     { id: 'volcengine', name: '火山引擎', models: ['doubao-seedream-4-5-251128', 'doubao-seedream-4-0-250828'] },
@@ -1460,7 +1464,7 @@ const providerConfigs = {
     { id: 'minimax', name: 'MiniMax 海螺', models: ['MiniMax-Hailuo-2.3', 'MiniMax-Hailuo-2.3-Fast', 'MiniMax-Hailuo-02'] },
     { id: 'gemini', name: 'Google Gemini (Veo)', models: ['veo-3.1-generate-preview', 'veo-3.0-generate-preview', 'veo-3.0-fast-generate-preview'] },
     { id: 'dashscope', name: '通义万相', models: ['wan2.6-r2v-flash', 'wan2.6-t2v', 'wan2.2-kf2v-flash', 'wan2.6-i2v-flash', 'wanx2.1-vace-plus'] },
-    { id: 'xx_image', name: 'xx-image（xx1 异步视频）', models: ['sd2-fast-xx1', 'sd2-mini-xx1', 'sd2-pro-933-480-xx1', 'sd2-pro-max-480-xx1', 'sd2-pro-max-fast-xx1', 'sd2-pro-max-xx1', 'sd2-pro-xx1', 'video-sd25-480p-xx1', 'veo-omni-flash-ref-xx1', 'hailuo-h3-xx1'] },
+    { id: 'xx_image', name: 'xx-image（xx1 异步视频）', models: ['sd2-fast-xx1', 'sd2-mini-xx1', 'sd2-pro-933-480-xx1', 'sd2-pro-max-480-xx1', 'sd2-pro-max-fast-xx1', 'sd2-pro-max-xx1', 'sd2-pro-xx1', 'video-sd25-480p-xx1', 'video-sd25-30s-xx1', 'veo-omni-flash-ref-xx1', 'hailuo-h3-xx1'] },
     {
       id: 'jimeng_ai_api',
       name: 'Jimeng AI API（自建即梦免费 API）',
@@ -1517,7 +1521,9 @@ const providerProtocolMap = {
 
 function getProtocolForProvider(provider, serviceType) {
   if (provider === 'xx_image') {
-    return serviceType === 'video' ? 'openai_video_tasks' : 'openai_image_tasks'
+    if (serviceType === 'video') return 'openai_video_tasks'
+    if (serviceType === 'text') return 'openai'
+    return 'openai_image_tasks'
   }
   return providerProtocolMap[provider] || (serviceType === 'text' ? '' : 'openai')
 }
@@ -1641,7 +1647,7 @@ const endpointPreviewInfo = computed(() => {
   let submitPath = '', queryPath = ''
 
   if (service_type === 'text') {
-    submitPath = '/chat/completions'
+    submitPath = endpoint || '/chat/completions'
   } else if (service_type === 'tts') {
     if (p === 'minimax') {
       submitPath = '/t2a_v2?GroupId={group_id}'
@@ -1795,6 +1801,9 @@ function onProviderChange(providerId) {
   }
   // 自动填充接口规范
   form.value.api_protocol = getProtocolForProvider(providerId, st)
+  if (st === 'text' && providerId === 'xx_image') {
+    form.value.endpoint = '/v1/chat/completions'
+  }
   if (st === 'video' && providerId === 'jimeng_ai_api') {
     form.value.endpoint = ''
     form.value.query_endpoint = ''
@@ -1853,8 +1862,15 @@ const AGNES_CONFIGS = [
   { service_type: 'video', name: 'Agnes 视频', base_url: 'https://apihub.agnes-ai.com/v1', provider: 'agnes', api_protocol: 'agnes', endpoint: '/videos', query_endpoint: '/videos/{taskId}', model: ['agnes-video-v2.0'] },
 ]
 
-/** xx-image 一键配置：图片和视频使用不同的异步 OpenAI 兼容协议 */
+/** xx-image 一键配置：文本走 OpenAI Chat；图片和视频使用不同的异步 OpenAI 兼容协议 */
 const XX_IMAGE_CONFIGS = [
+  {
+    service_type: 'text',
+    name: 'xx-image 文本',
+    api_protocol: 'openai',
+    endpoint: '/v1/chat/completions',
+    model: ['gpt-5.6-terra'],
+  },
   {
     service_type: 'image',
     name: 'xx-image GPT Image 文本生图',
@@ -1880,6 +1896,7 @@ const XX_IMAGE_CONFIGS = [
       'sd2-pro-max-xx1',
       'sd2-pro-xx1',
       'video-sd25-480p-xx1',
+      'video-sd25-30s-xx1',
       'veo-omni-flash-ref-xx1',
       'hailuo-h3-xx1',
     ],
@@ -2340,11 +2357,13 @@ async function submitOneKeyXxImage() {
         api_key: apiKey,
         model: models,
         default_model: models[0] || null,
+        endpoint: cfg.endpoint || '',
+        query_endpoint: cfg.query_endpoint || '',
         priority: 10,
         is_default: true,
       })
     }
-    ElMessage.success('已创建 xx-image 文本生图、分镜图、异步视频配置')
+    ElMessage.success('已创建 xx-image 文本、文本生图、分镜图、异步视频配置')
     oneKeyXxImageVisible.value = false
     await loadList()
   } catch (_) {

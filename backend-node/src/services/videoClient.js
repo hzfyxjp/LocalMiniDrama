@@ -58,6 +58,21 @@ function isXx1Sd2VideoModel(modelName) {
   return /^sd2(?:[-_./]|$)/.test(m) || /(?:^|[-_./])sd2(?:[-_./]|$)/.test(m);
 }
 
+/** video-sd25-30s-xx1：按次计费，时长只允许 5 或 30 秒 */
+function isXx1Sd25FixedDurationModel(modelName) {
+  const m = String(modelName || '').trim().toLowerCase();
+  return m === 'video-sd25-30s-xx1' || /video-sd25-30s/.test(m);
+}
+
+function normalizeXx1VideoDuration(modelName, durationNum) {
+  const d = Number(durationNum);
+  const safe = Number.isFinite(d) && d > 0 ? Math.round(d) : 5;
+  if (isXx1Sd25FixedDurationModel(modelName)) {
+    return safe <= 10 ? 5 : 30;
+  }
+  return Math.max(1, safe);
+}
+
 /** 官方模型 ID：MiniMax-H3（Video Generation V2） */
 function isMinimaxH3Model(name) {
   const m = String(name || '').trim().toLowerCase();
@@ -3825,7 +3840,7 @@ async function callOpenAIVideoTasksApi(config, log, opts) {
   const normalizedPrompt = normalizeChineseImageTagsToEnglish(prompt || '');
   const refPrefix = buildAtImageReferencePrefix(resolvedRefs, reference_context_note);
   const effectivePrompt = refPrefix ? `${refPrefix}\n\n${normalizedPrompt}` : normalizedPrompt;
-  const durationSeconds = Math.max(1, Math.round(Number(duration) || 5));
+  const durationSeconds = normalizeXx1VideoDuration(model, duration);
   const durationField = isXx1Sd2VideoModel(model) ? 'seconds' : 'duration';
   const body = {
     model: model || '',
@@ -4727,6 +4742,8 @@ module.exports = {
   buildAgnesVideoImagePayload,
   formatVideoPostBodyForLog,
   isSeedance2FamilyModel,
+  isXx1Sd25FixedDurationModel,
+  normalizeXx1VideoDuration,
   normalizeVolcengineDuration,
   isMinimaxH3Model,
   getMinimaxApiRoot,
